@@ -59,6 +59,26 @@ impl PriceOracle {
         }
     }
 
+    /// Returns None instead of an error when asset is not found — safe for frontend callers.
+    pub fn get_price_safe(env: Env, asset: Symbol) -> Option<PriceData> {
+        let prices: soroban_sdk::Map<Symbol, PriceData> = env
+            .storage()
+            .instance()
+            .get(&PRICE_DATA_KEY)
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+        prices.get(asset)
+    }
+
+    /// Returns a Vec of all currently tracked asset symbols.
+    pub fn get_all_assets(env: Env) -> soroban_sdk::Vec<Symbol> {
+        let prices: soroban_sdk::Map<Symbol, PriceData> = env
+            .storage()
+            .instance()
+            .get(&PRICE_DATA_KEY)
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+        prices.keys()
+    }
+
     /// Set the price data for a specific asset (admin function)
     ///
     /// # Arguments
@@ -83,4 +103,5 @@ impl PriceOracle {
 }
 
 mod auth;
+mod median;
 mod test;
