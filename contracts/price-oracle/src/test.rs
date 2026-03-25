@@ -25,7 +25,7 @@ fn test_get_price_existing_asset() {
     // Get the price and verify it matches (using try_get_price to get Result)
     let result = client.try_get_price(&asset);
     assert!(result.is_ok());
-    
+
     let retrieved_price = result.unwrap().unwrap();
     assert_eq!(retrieved_price.asset, asset);
     assert_eq!(retrieved_price.price, 1_000_000);
@@ -45,7 +45,7 @@ fn test_get_price_nonexistent_asset() {
     // Get the price and verify it returns an error
     let result = client.try_get_price(&asset);
     assert!(result.is_err());
-    
+
     // Verify the error is AssetNotFound
     let err = result.unwrap_err().unwrap();
     assert_eq!(err, Error::AssetNotFound);
@@ -58,18 +58,18 @@ fn test_get_price_multiple_assets() {
     let client = PriceOracleClient::new(&env, &contract_id);
 
     let source = Address::generate(&env);
-    
+
     // Create price data for multiple assets
     let xlm_asset = symbol_short!("XLM");
     let btc_asset = symbol_short!("BTC");
-    
+
     let xlm_price = PriceData {
         asset: xlm_asset.clone(),
         price: 1_000_000,
         timestamp: 1234567890,
         source: source.clone(),
     };
-    
+
     let btc_price = PriceData {
         asset: btc_asset.clone(),
         price: 50_000_000_000, // $50,000 (scaled by 1e6)
@@ -97,7 +97,7 @@ fn test_get_price_after_update() {
 
     let source = Address::generate(&env);
     let asset = symbol_short!("XLM");
-    
+
     // Set initial price
     let initial_price = PriceData {
         asset: asset.clone(),

@@ -1,5 +1,7 @@
 #![no_std]
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
+};
 
 /// Error types for the price oracle contract
 #[contracterror]
@@ -33,32 +35,32 @@ pub struct PriceOracle;
 #[contractimpl]
 impl PriceOracle {
     /// Get the price data for a specific asset
-    /// 
+    ///
     /// # Arguments
     /// * `env` - The contract environment
     /// * `asset` - The asset symbol to look up
-    /// 
+    ///
     /// # Returns
     /// * `Ok(PriceData)` - The price data for the asset
     /// * `Err(Error::AssetNotFound)` - If the asset doesn't exist
     pub fn get_price(env: Env, asset: Symbol) -> Result<PriceData, Error> {
         // Get the storage instance
         let storage = env.storage().instance();
-        
+
         // Try to retrieve the price data map
         let prices: soroban_sdk::Map<Symbol, PriceData> = storage
             .get(&PRICE_DATA_KEY)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
-        
+
         // Try to get the price for the specified asset
         match prices.get(asset) {
             Some(price_data) => Ok(price_data),
             None => Err(Error::AssetNotFound),
         }
     }
-    
+
     /// Set the price data for a specific asset (admin function)
-    /// 
+    ///
     /// # Arguments
     /// * `env` - The contract environment
     /// * `asset` - The asset symbol
@@ -66,18 +68,19 @@ impl PriceOracle {
     pub fn set_price(env: Env, asset: Symbol, price_data: PriceData) {
         // Get the storage instance
         let storage = env.storage().instance();
-        
+
         // Get existing prices or create new map
         let mut prices: soroban_sdk::Map<Symbol, PriceData> = storage
             .get(&PRICE_DATA_KEY)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
-        
+
         // Set the price for the asset
         prices.set(asset, price_data);
-        
+
         // Store the updated map
         storage.set(&PRICE_DATA_KEY, &prices);
     }
 }
 
+mod admin;
 mod test;
