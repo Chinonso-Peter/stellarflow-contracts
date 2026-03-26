@@ -230,6 +230,31 @@ fn test_update_price_multiple_updates() {
 }
 
 #[test]
+fn test_update_price_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let asset = symbol_short!("NGN");
+    let price: i128 = 1_500_000;
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &admin);
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    env.ledger().set_timestamp(1_700_000_000);
+    client.update_price(&provider, &asset, &price);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+}
+
+#[test]
 fn test_calculate_percentage_change_bps_for_increase() {
     assert_eq!(
         calculate_percentage_change_bps(1_000_000, 1_200_000),

@@ -6,6 +6,8 @@ use soroban_sdk::{
 
 use crate::types::PriceData;
 
+const PRICE_DATA_KEY: Symbol = symbol_short!("prices");
+
 /// Error types for the price oracle contract
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -167,6 +169,8 @@ impl PriceOracle {
             timestamp,
         }
         .publish(&env);
+
+        Ok(())
     }
 }
 
