@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, Env, Symbol};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Storage Key
@@ -8,6 +8,7 @@ use soroban_sdk::{contracttype, Address, Env};
 pub enum DataKey {
     Admin,
     Provider(Address),
+    Price(Symbol),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
