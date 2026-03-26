@@ -1,95 +1,89 @@
-# 🌊 StellarFlow Frontend
+# 🦀 StellarFlow-Contracts
+*The High-Fidelity Oracle for African Corridors on Soroban.*
 
-> 🌍 **Africa-Oriented Data Oracle Dashboard** | Modern Web3 interface for localized real-time data on Stellar.
+StellarFlow is a decentralized data oracle built on the Stellar Network. It provides real-time, verified exchange rates for African currencies (NGN, KES, GHS) to the Soroban ecosystem, enabling the next generation of localized DeFi, cross-border payments, and yield protocols.
 
-StellarFlow Frontend is a cutting-edge **Next.js 15** application that provides a seamless user interface for interacting with the StellarFlow Oracle. [cite_start]Our platform specializes in providing localized, high-impact data visualizations for the African market[cite: 1, 12].
+# 🏛️ Architecture Overview
+The contract acts as a secure, authorized ledger for price data. It is designed to be:
 
-## 🚀 Features
-- **💰 Multi-Currency Support**: View data in XLM, NGN, KES, and GHS.
-- [cite_start]**🔐 Wallet Integration**: Support for Albedo and Freightliner[cite: 701].
-- [cite_start]**📱 Mobile-First Design**: Optimized for performance on lower-bandwidth devices using Tailwind CSS[cite: 1, 91].
-- [cite_start]**📊 Live Oracle Feed**: Real-time status updates from the StellarFlow Backend[cite: 5, 185].
+Authorized: Only whitelisted providers (Relayers) can update prices.
 
-## 🛠️ Quick Start
-### Prerequisites
-- [cite_start]**Node.js** v18+ [cite: 83]
-- [cite_start]**Stellar Wallet** (Albedo recommended) [cite: 760]
+Immutable: All updates are time-stamped and emitted as events for transparency.
+
+Interoperable: Designed to be called by other Soroban smart contracts (C2C).
+
+# 🚀 Getting Started
+Prerequisites
+> Rust
+
+Soroban CLI
+> Target: wasm32-unknown-unknown
 
 ### Installation
-```bash
-git clone [https://github.com/StellarFlow-Network/stellarflow-frontend.git](https://github.com/StellarFlow-Network/stellarflow-frontend.git)
-cd stellarflow-frontend
-npm install
-npm run dev
 
-🎨 Tech Stack
+**Clone the repository:**
 
-Framework: Next.js 15 (App Router) 
-Styling: Tailwind CSS 
-State Management: Zustand 
-Web3: @stellar/stellar-sdk
+```Bash
+git clone https://github.com/SFN/stellarflow-contracts.git
+cd stellarflow-contracts
+```
 
----
+**Build the contract:**
 
-### 2. Backend README (`stellarflow-backend`)
-**Location:** `stellarflow-backend/README.md`
+```Bash
+soroban contract build 
+```
+📂 Project Structure
 
-```markdown
-# ⚙️ StellarFlow Backend
-
-> 🏗️ **Oracle Infrastructure & Data Engine** | TypeScript/Node.js backend for the StellarFlow network.
-
-This repository serves as the central data engine for StellarFlow. It orchestrates real-time price fetching from localized African markets and feeds that data to the Soroban smart contracts on the Stellar blockchain[cite: 17, 172].
-
-## 🛠️ Key Services
-- **🛰️ Price Oracle**: Fetches real-time exchange rates (e.g., NGN/XLM) every 10 seconds[cite: 179].
-- **🔗 Soroban Service**: Interfaces with on-chain contracts to resolve oracle data[cite: 180].
-- **🛡️ JWT Auth**: Secure, wallet-based authentication[cite: 172].
-- **💾 Database**: Scalable PostgreSQL with Prisma ORM[cite: 194].
-
-## 📂 Project Structure
-```text
-├── prisma/        # Database schema and migrations [cite: 194]
 ├── src/
-│   ├── routes/    # API Endpoints [cite: 174]
-│   ├── services/  # Business logic (Oracle, Soroban) [cite: 175]
-│   └── utils/     # Helper functions [cite: 176]
 
-Running the Server
+|            ├── lib.rs          # Main contract entry point and public interface
 
-Configure .env: Copy .env.example and add your SOROBAN_ADMIN_SECRET.
-Install: npm install 
-Run: npm run dev
+│            ├── types.rs        # Custom structs (PriceData) and Enums (DataKey)
 
----
+│            ├── storage.rs      # Persistent and Instance storage logic
 
-### 3. Smart Contracts README (`stellarflow-contracts`)
-**Location:** `stellarflow-contracts/README.md`
+│            ├── auth.rs         # require_auth and Admin-check functions
 
-```markdown
-# 📜 StellarFlow Smart Contracts
+│            └── test.rs         # Comprehensive unit and integration tests
 
-> 💎 **Soroban Smart Contracts** | The trustless core of the StellarFlow Oracle.
+├── Cargo.toml          # Project dependencies (soroban-sdk)
 
-These smart contracts, written in **Rust**, manage the on-chain verification and storage of Oracle data. Built specifically for the **Soroban** platform on Stellar[cite: 170, 443].
+└── README.md
 
-## 🛡️ Contract Functions
-- **`initialize`**: Set the admin and authorized data providers.
-- **`push_data`**: Allow authorized oracles to submit new data points.
-- **`get_latest_price`**: Public function for other dApps to consume Oracle data.
 
-## 🔧 Development
-### Prerequisites
-- **Rust Toolchain**: `rustup` [cite: 195]
-- **Stellar CLI**: `stellar-cli` 
 
-### Build & Test
-```bash
-# Build the contract to .wasm
-stellar contract build
+# 🛠️ Public Interface (API)
+**Admin Functions**
+> initialize(admin: Address): Sets the global contract administrator.
 
-# Run unit tests
+> add_provider(provider: Address): Whitelists a backend relayer to push data.
+
+**Data Submission (Authorized)**
+update_price(source: Address, asset: Symbol, price: i128): Updates the price for a specific asset. Requires source authorization.
+
+**Data Retrieval (Public)**
+> get_price(asset: Symbol) -> PriceData: Returns the latest price, timestamp, and provider info.
+
+> get_all_assets() -> Vec<Symbol>: Returns a list of all currently tracked currency pairs.
+
+# 🧪 Testing Policy
+
+***We maintain a "No Test, No Merge" policy.***
+
+All Pull Requests (PRs) must include a updated test.rs file. To run the test suite:
+
+```Bash
 cargo test
+```
 
-Acknowledgments
-Built with ❤️ for the Stellar Africa community.
+**Tests must verify:**
+
+> Success Paths: Correct data storage and retrieval.
+
+> Security Paths: Rejection of unauthorized update_price calls.
+
+> Edge Cases: Handling of missing assets or zero-value inputs.
+
+# 📜 License
+This project is licensed under the MIT License - see the LICENSE file for details.

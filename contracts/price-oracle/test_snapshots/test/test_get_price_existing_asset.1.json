@@ -34,7 +34,7 @@
                 "map": [
                   {
                     "key": {
-                      "symbol": "NGN"
+                      "symbol": "XLM"
                     },
                     "val": {
                       "map": [
@@ -43,7 +43,7 @@
                             "symbol": "asset"
                           },
                           "val": {
-                            "symbol": "NGN"
+                            "symbol": "XLM"
                           }
                         },
                         {
