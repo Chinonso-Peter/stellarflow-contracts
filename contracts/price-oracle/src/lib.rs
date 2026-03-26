@@ -176,6 +176,7 @@ impl PriceOracle {
 
 mod asset_symbol;
 mod auth;
+pub mod math;
 mod median;
 mod test;
 mod types;
