@@ -10,6 +10,7 @@ use soroban_sdk::{contracttype, Address, Env};
 pub enum DataKey {
     Admin,
     Provider(Address),
+    IsPaused,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -55,6 +56,21 @@ pub fn _require_admin(env: &Env, caller: &Address) {
     if !_is_admin(env, caller) {
         panic!("Unauthorised: caller is not the admin");
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pause Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub fn _is_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get::<DataKey, bool>(&DataKey::IsPaused)
+        .unwrap_or(false)
+}
+
+pub fn _set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&DataKey::IsPaused, &paused);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

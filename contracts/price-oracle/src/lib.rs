@@ -4,6 +4,8 @@ use soroban_sdk::{contract, contracterror, contractevent, contractimpl, Address,
 
 use crate::types::{DataKey, PriceData};
 
+const PRICE_DATA_KEY: Symbol = symbol_short!("prices");
+
 /// Error types for the price oracle contract
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -98,6 +100,14 @@ impl PriceOracle {
         prices.get(asset)
     }
 
+    /// Get the most recent price for a specific asset.
+    ///
+    /// Returns the price value as an i128, or an error if the asset is not found.
+    pub fn get_last_price(env: Env, asset: Symbol) -> Result<i128, Error> {
+        let price_data = Self::get_price(env, asset)?;
+        Ok(price_data.price)
+    }
+
     /// Returns a vector of all currently tracked asset symbols.
     pub fn get_all_assets(env: Env) -> soroban_sdk::Vec<Symbol> {
         let prices: soroban_sdk::Map<Symbol, PriceData> = env
@@ -138,7 +148,7 @@ impl PriceOracle {
     /// * `Error::InvalidAssetSymbol` - If `asset` is not NGN, KES, or GHS
     ///
     /// # Panics
-    /// If `source` is not a whitelisted provider.
+    /// If `source` is not a whitelisted provider or if the contract is paused.
     pub fn update_price(
         env: Env,
         source: Address,
@@ -185,6 +195,7 @@ impl PriceOracle {
 
 mod asset_symbol;
 mod auth;
+pub mod math;
 mod median;
 mod test;
 mod types;
