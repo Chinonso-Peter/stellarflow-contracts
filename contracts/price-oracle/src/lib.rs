@@ -100,6 +100,14 @@ impl PriceOracle {
         prices.get(asset)
     }
 
+    /// Get the most recent price for a specific asset.
+    ///
+    /// Returns the price value as an i128, or an error if the asset is not found.
+    pub fn get_last_price(env: Env, asset: Symbol) -> Result<i128, Error> {
+        let price_data = Self::get_price(env, asset)?;
+        Ok(price_data.price)
+    }
+
     /// Returns a vector of all currently tracked asset symbols.
     pub fn get_all_assets(env: Env) -> soroban_sdk::Vec<Symbol> {
         let prices: soroban_sdk::Map<Symbol, PriceData> = env
