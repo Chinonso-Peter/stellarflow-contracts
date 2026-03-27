@@ -1,5 +1,13 @@
 use soroban_sdk::{contracttype, Address};
 
+/// Storage keys for contract data
+#[contracttype]
+pub enum DataKey {
+    Admin,
+    BaseCurrencyPairs,
+    PriceData,
+}
+
 /// Canonical storage format for a price entry.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -10,4 +18,6 @@ pub struct PriceData {
     pub timestamp: u64,
     /// Address that provided the price update.
     pub provider: Address,
+    /// Number of decimals for the price value.
+    pub decimals: u32,
 }
