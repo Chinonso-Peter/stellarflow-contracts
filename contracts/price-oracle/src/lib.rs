@@ -1,10 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, symbol_short, Address, Env, Symbol,
-};
+use soroban_sdk::{contract, contracterror, contractevent, contractimpl, Address, Env, Symbol};
 
-use crate::types::PriceData;
+use crate::types::{DataKey, PriceData};
 
 /// Error types for the price oracle contract
 #[contracterror]
@@ -65,11 +63,23 @@ pub fn calculate_percentage_difference_bps(old_price: i128, new_price: i128) -> 
 
 #[contractimpl]
 impl PriceOracle {
+    /// Initialize the contract with admin and base currency pairs.
+    /// Can only be called once.
+    pub fn initialize(env: Env, admin: Address, base_currency_pairs: soroban_sdk::Vec<Symbol>) {
+        // Prevent double initialization
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("Contract already initialized");
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::BaseCurrencyPairs, &base_currency_pairs);
+    }
     /// Get the price data for a specific asset.
     pub fn get_price(env: Env, asset: Symbol) -> Result<PriceData, Error> {
         let storage = env.storage().persistent();
         let prices: soroban_sdk::Map<Symbol, PriceData> = storage
-            .get(&PRICE_DATA_KEY)
+            .get(&DataKey::PriceData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
 
         match prices.get(asset) {
@@ -83,7 +93,7 @@ impl PriceOracle {
         let prices: soroban_sdk::Map<Symbol, PriceData> = env
             .storage()
             .persistent()
-            .get(&PRICE_DATA_KEY)
+            .get(&DataKey::PriceData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
         prices.get(asset)
     }
@@ -93,27 +103,27 @@ impl PriceOracle {
         let prices: soroban_sdk::Map<Symbol, PriceData> = env
             .storage()
             .persistent()
-            .get(&PRICE_DATA_KEY)
+            .get(&DataKey::PriceData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
         prices.keys()
     }
 
     /// Set the price data for a specific asset.
-    pub fn set_price(env: Env, asset: Symbol, val: i128) {
+    pub fn set_price(env: Env, asset: Symbol, val: i128, decimals: u32) {
         let storage = env.storage().persistent();
         let mut prices: soroban_sdk::Map<Symbol, PriceData> = storage
-            .get(&PRICE_DATA_KEY)
+            .get(&DataKey::PriceData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
 
         let price_data = PriceData {
             price: val,
             timestamp: env.ledger().timestamp(),
             provider: env.current_contract_address(),
+            decimals,
         };
 
         prices.set(asset, price_data);
-        storage.set(&PRICE_DATA_KEY, &prices);
-        Ok(())
+        storage.set(&DataKey::PriceData, &prices);
     }
 
     /// Update the price for a specific asset (authorized backend relayer function)
@@ -134,7 +144,10 @@ impl PriceOracle {
         source: Address,
         asset: Symbol,
         price: i128,
+        decimals: u32,
     ) -> Result<(), Error> {
+        source.require_auth();
+
         if !asset_symbol::is_approved_asset_symbol(asset.clone()) {
             return Err(Error::InvalidAssetSymbol);
         }
@@ -143,11 +156,9 @@ impl PriceOracle {
             panic!("Unauthorised: caller is not a whitelisted provider");
         }
 
-        source.require_auth();
-
         let storage = env.storage().persistent();
         let mut prices: soroban_sdk::Map<Symbol, PriceData> = storage
-            .get(&PRICE_DATA_KEY)
+            .get(&DataKey::PriceData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
 
         let timestamp = env.ledger().timestamp();
@@ -155,10 +166,11 @@ impl PriceOracle {
             price,
             timestamp,
             provider: source.clone(),
+            decimals,
         };
 
         prices.set(asset.clone(), price_data);
-        storage.set(&PRICE_DATA_KEY, &prices);
+        storage.set(&DataKey::PriceData, &prices);
 
         PriceUpdated {
             source,
@@ -167,6 +179,7 @@ impl PriceOracle {
             timestamp,
         }
         .publish(&env);
+        Ok(())
     }
 }
 

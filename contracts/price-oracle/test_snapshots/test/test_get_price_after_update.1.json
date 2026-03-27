@@ -29,7 +29,11 @@
               "ext": "v0",
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
               "key": {
-                "symbol": "PRICES"
+                "vec": [
+                  {
+                    "symbol": "PriceData"
+                  }
+                ]
               },
               "durability": "persistent",
               "val": {
@@ -42,10 +46,10 @@
                       "map": [
                         {
                           "key": {
-                            "symbol": "asset"
+                            "symbol": "decimals"
                           },
                           "val": {
-                            "symbol": "XLM"
+                            "u32": 6
                           }
                         },
                         {
@@ -54,6 +58,14 @@
                           },
                           "val": {
                             "i128": "1200000"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "provider"
+                          },
+                          "val": {
+                            "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                           }
                         },
                         {
