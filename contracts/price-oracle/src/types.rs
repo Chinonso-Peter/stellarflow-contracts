@@ -23,3 +23,11 @@ pub struct PriceData {
     /// Confidence score (0-100, higher is more confident)
     pub confidence_score: u32,
 }
+
+/// A simplified price entry for external consumers.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceEntry {
+    pub price: i128,
+    pub timestamp: u64,
+}
