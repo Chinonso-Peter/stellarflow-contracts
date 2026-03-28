@@ -63,6 +63,8 @@ pub enum Error {
     NotAuthorized = 5,
     /// Contract or admin has already been initialized.
     AlreadyInitialized = 6,
+    /// Price change exceeds the allowed delta limit in a single update.
+    PriceDeltaExceeded = 7,
 }
 
 #[contract]
@@ -337,10 +339,19 @@ impl PriceOracle {
             .get(&DataKey::PriceData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
 
-        let _old_price = prices
+        let old_price = prices
             .get(asset.clone())
             .map(|existing_price| existing_price.price)
             .unwrap_or(0);
+
+        // Delta limit circuit breaker: reject if price moves more than 50 in one update.
+        // Skip on first write (old_price == 0).
+        if old_price != 0 {
+            let delta = (price - old_price).unsigned_abs();
+            if delta > 50 {
+                return Err(Error::PriceDeltaExceeded);
+            }
+        }
 
         let timestamp = env.ledger().timestamp();
         let price_data = PriceData {
