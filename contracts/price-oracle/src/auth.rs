@@ -1,6 +1,4 @@
-#[cfg(test)]
-use soroban_sdk::testutils::Events;
-use soroban_sdk::{contracttype, symbol_short, Address, Env};
+use soroban_sdk::{contracttype, Address, Env};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Storage Key
@@ -18,16 +16,7 @@ pub enum DataKey {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn _set_admin(env: &Env, admin: &Address) {
-    let previous_admin = if _has_admin(env) {
-        Some(_get_admin(env))
-    } else {
-        None
-    };
-
     env.storage().instance().set(&DataKey::Admin, admin);
-
-    env.events()
-        .publish((symbol_short!("adminchg"),), (previous_admin, admin.clone()));
 }
 
 pub fn _get_admin(env: &Env) -> Address {
@@ -110,8 +99,7 @@ pub fn _require_provider(env: &Env, caller: &Address) {
 mod auth_tests {
     extern crate alloc;
     use super::*;
-    use alloc::format;
-    use soroban_sdk::{contract, contractimpl, testutils::Address as _, Env};
+    use soroban_sdk::{contract, contractimpl};
 
     #[contract]
     struct TestContract;
@@ -122,7 +110,7 @@ mod auth_tests {
     fn setup() -> (Env, soroban_sdk::Address, Address) {
         let env = Env::default();
         let contract_id = env.register(TestContract, ());
-        let admin = Address::generate(&env);
+        let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         env.as_contract(&contract_id, || {
             _set_admin(&env, &admin);
         });
@@ -142,7 +130,7 @@ mod auth_tests {
     #[test]
     fn test_is_admin_false_for_non_admin() {
         let (env, contract_id, _) = setup();
-        let other = Address::generate(&env);
+        let other = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         env.as_contract(&contract_id, || {
             assert!(!_is_admin(&env, &other));
         });
@@ -152,7 +140,7 @@ mod auth_tests {
     fn test_is_admin_false_when_no_admin_set() {
         let env = Env::default();
         let contract_id = env.register(TestContract, ());
-        let random = Address::generate(&env);
+        let random = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         env.as_contract(&contract_id, || {
             assert!(!_is_admin(&env, &random));
         });
@@ -170,7 +158,7 @@ mod auth_tests {
     #[should_panic(expected = "Unauthorised: caller is not the admin")]
     fn test_require_admin_panics_for_non_admin() {
         let (env, contract_id, _) = setup();
-        let other = Address::generate(&env);
+        let other = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         env.as_contract(&contract_id, || {
             _require_admin(&env, &other);
         });
@@ -206,7 +194,7 @@ mod auth_tests {
     #[test]
     fn test_add_provider_marks_as_whitelisted() {
         let (env, contract_id, _) = setup();
-        let provider = Address::generate(&env);
+        let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         env.as_contract(&contract_id, || {
             assert!(!_is_provider(&env, &provider));
             _add_provider(&env, &provider);
@@ -217,7 +205,7 @@ mod auth_tests {
     #[test]
     fn test_remove_provider_clears_whitelist() {
         let (env, contract_id, _) = setup();
-        let provider = Address::generate(&env);
+        let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         env.as_contract(&contract_id, || {
             _add_provider(&env, &provider);
             assert!(_is_provider(&env, &provider));
@@ -229,7 +217,7 @@ mod auth_tests {
     #[test]
     fn test_remove_nonexistent_provider_is_safe() {
         let (env, contract_id, _) = setup();
-        let provider = Address::generate(&env);
+        let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         env.as_contract(&contract_id, || {
             _remove_provider(&env, &provider); // must not panic
             assert!(!_is_provider(&env, &provider));
@@ -239,9 +227,9 @@ mod auth_tests {
     #[test]
     fn test_multiple_providers_are_independent() {
         let (env, contract_id, _) = setup();
-        let p1 = Address::generate(&env);
-        let p2 = Address::generate(&env);
-        let p3 = Address::generate(&env);
+        let p1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let p2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let p3 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         env.as_contract(&contract_id, || {
             _add_provider(&env, &p1);
             _add_provider(&env, &p2);
@@ -259,7 +247,7 @@ mod auth_tests {
     #[test]
     fn test_require_provider_passes_for_whitelisted() {
         let (env, contract_id, _) = setup();
-        let provider = Address::generate(&env);
+        let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         env.as_contract(&contract_id, || {
             _add_provider(&env, &provider);
             _require_provider(&env, &provider); // must not panic
@@ -270,7 +258,7 @@ mod auth_tests {
     #[should_panic(expected = "Unauthorised: caller is not a whitelisted provider")]
     fn test_require_provider_panics_for_non_provider() {
         let (env, contract_id, _) = setup();
-        let random = Address::generate(&env);
+        let random = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
         env.as_contract(&contract_id, || {
             _require_provider(&env, &random);
         });
@@ -283,36 +271,5 @@ mod auth_tests {
             assert!(_is_admin(&env, &admin));
             assert!(!_is_provider(&env, &admin));
         });
-    }
-
-    // ── AdminChanged event tests ─────────────────────────────────────────────
-
-    #[test]
-    fn test_set_admin_emits_event_on_first_set() {
-        let env = Env::default();
-        let contract_id = env.register(TestContract, ());
-        let admin = Address::generate(&env);
-
-        env.as_contract(&contract_id, || {
-            _set_admin(&env, &admin);
-        });
-
-        let events = env.events().all();
-        let debug_str = format!("{:?}", events);
-        assert!(!debug_str.is_empty());
-    }
-
-    #[test]
-    fn test_set_admin_emits_event_on_admin_change() {
-        let (env, contract_id, _old_admin) = setup();
-        let new_admin = Address::generate(&env);
-
-        env.as_contract(&contract_id, || {
-            _set_admin(&env, &new_admin);
-        });
-
-        let events = env.events().all();
-        let debug_str = format!("{:?}", events);
-        assert!(!debug_str.is_empty());
     }
 }
