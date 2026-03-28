@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, Address, Env, Symbol};
+use soroban_sdk::{contract, contractclient, contracterror, contractimpl, Address, Env, Symbol};
 
 use crate::types::{DataKey, PriceData};
 
@@ -58,6 +58,12 @@ pub enum Error {
 #[contract]
 pub struct PriceOracle;
 
+#[soroban_sdk::contractevent]
+pub struct PriceUpdatedEvent {
+    pub asset: Symbol,
+    pub price: i128,
+}
+
 /// Returns the signed percentage change in basis points.
 ///
 /// Example: 1_000_000 -> 1_200_000 returns 2_000 (20.00%).
@@ -97,7 +103,7 @@ fn is_valid(price: i128) -> bool {
 ///
 /// # Returns
 /// `true` if the price is stale (expired), `false` otherwise
-fn is_stale(current_time: u64, stored_timestamp: u64, ttl: u64) -> bool {
+pub fn is_stale(current_time: u64, stored_timestamp: u64, ttl: u64) -> bool {
     current_time >= stored_timestamp.saturating_add(ttl)
 }
 
@@ -108,19 +114,31 @@ impl PriceOracle {
     pub fn initialize(env: Env, admin: Address, base_currency_pairs: soroban_sdk::Vec<Symbol>) {
         // Prevent double initialization
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("Contract already initialized");
+           panic!("Contract already initialized");
         }
-        env.storage().instance().set(&DataKey::Admin, &admin);
+
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "AdminChanged"),),
+            admin.clone(),
+        );
+
+        crate::auth::_set_admin(&env, &admin);
         env.storage()
             .instance()
             .set(&DataKey::BaseCurrencyPairs, &base_currency_pairs);
     }
 
-    /// Initialize the admin once for the auth helper flow used in tests and governance actions.
     pub fn init_admin(env: Env, admin: Address) {
         if crate::auth::_has_admin(&env) {
             panic!("Admin already initialised");
         }
+
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "AdminChanged"),),
+            admin.clone(),
+        );
 
         crate::auth::_set_admin(&env, &admin);
     }
@@ -251,7 +269,7 @@ impl PriceOracle {
             .get(&DataKey::PriceData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
 
-        let old_price = prices
+        let _old_price = prices
             .get(asset.clone())
             .map(|existing_price| existing_price.price)
             .unwrap_or(0);
@@ -269,8 +287,10 @@ impl PriceOracle {
         prices.set(asset.clone(), price_data);
         storage.set(&DataKey::PriceData, &prices);
 
-        env.events()
-            .publish((Symbol::new(&env, "PriceUpdated"),), (asset, price));
+        env.events().publish_event(&PriceUpdatedEvent {
+            asset,
+            price,
+        });
 
         Ok(())
     }

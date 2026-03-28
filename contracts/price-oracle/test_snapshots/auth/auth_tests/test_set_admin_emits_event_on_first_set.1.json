@@ -80,7 +80,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "adminchg"
+                "symbol": "AdminChanged"
               }
             ],
             "data": {
