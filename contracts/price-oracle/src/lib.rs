@@ -225,6 +225,29 @@ impl PriceOracle {
         storage.set(&DataKey::PriceData, &prices);
     }
 
+    /// Remove an asset from the oracle, deleting its price entry.
+    ///
+    /// Only the admin can call this. Returns `Error::AssetNotFound` if the asset
+    /// is not currently tracked. Frees ledger space for decommissioned pairs.
+    pub fn remove_asset(env: Env, admin: Address, asset: Symbol) -> Result<(), Error> {
+        admin.require_auth();
+        crate::auth::_require_admin(&env, &admin);
+
+        let storage = env.storage().persistent();
+        let mut prices: soroban_sdk::Map<Symbol, PriceData> = storage
+            .get(&DataKey::PriceData)
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+
+        if !prices.contains_key(asset.clone()) {
+            return Err(Error::AssetNotFound);
+        }
+
+        prices.remove(asset);
+        storage.set(&DataKey::PriceData, &prices);
+
+        Ok(())
+    }
+
     /// Update the price for a specific asset (authorized backend relayer function)
     ///
     /// # Arguments

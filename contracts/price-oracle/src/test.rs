@@ -433,6 +433,107 @@ fn test_is_stale_with_mocked_ledger_time() {
 // Cross-Contract Tests - Dummy Consumer calling the Oracle
 // ============================================================================
 
+// ============================================================================
+// remove_asset tests
+// ============================================================================
+
+#[test]
+fn test_remove_asset_deletes_price_entry() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &admin);
+    });
+
+    let asset = symbol_short!("NGN");
+    client.set_price(&asset, &1_000_i128, &2u32, &3600u64);
+
+    // Confirm it exists
+    assert!(client.get_price_safe(&asset).is_some());
+
+    // Remove it
+    client.remove_asset(&admin, &asset);
+
+    // Should be gone
+    assert!(client.get_price_safe(&asset).is_none());
+}
+
+#[test]
+fn test_remove_asset_not_in_get_all_assets() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &admin);
+    });
+
+    let ngn = symbol_short!("NGN");
+    let kes = symbol_short!("KES");
+    client.set_price(&ngn, &1_000_i128, &2u32, &3600u64);
+    client.set_price(&kes, &500_i128, &2u32, &3600u64);
+
+    client.remove_asset(&admin, &ngn);
+
+    let assets = client.get_all_assets();
+    assert_eq!(assets.len(), 1);
+    assert!(!assets.contains(&ngn));
+    assert!(assets.contains(&kes));
+}
+
+#[test]
+fn test_remove_asset_nonexistent_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &admin);
+    });
+
+    let result = client.try_remove_asset(&admin, &symbol_short!("NGN"));
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::AssetNotFound),
+        other => panic!("expected AssetNotFound, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_remove_asset_non_admin_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let non_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &admin);
+    });
+
+    let asset = symbol_short!("NGN");
+    client.set_price(&asset, &1_000_i128, &2u32, &3600u64);
+
+    let result = client.try_remove_asset(&non_admin, &asset);
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// Cross-Contract Tests - Dummy Consumer calling the Oracle
+// ============================================================================
+
 #[test]
 fn test_dummy_consumer_calls_oracle_successfully() {
     let env = Env::default();
