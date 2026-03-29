@@ -6,6 +6,9 @@ pub enum DataKey {
     Admin,
     BaseCurrencyPairs,
     PriceData,
+    PriceBoundsData,
+    PendingAdmin,
+    PendingAdminTimestamp,
 }
 
 /// Canonical storage format for a price entry.
@@ -32,4 +35,13 @@ pub struct PriceData {
 pub struct PriceEntry {
     pub price: i128,
     pub timestamp: u64,
+    pub decimals: u32,
+}
+
+/// Min/max price bounds for an asset to prevent fat-finger errors.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceBounds {
+    pub min_price: i128,
+    pub max_price: i128,
 }
