@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractclient, contracterror, contractimpl, panic_with_error, Address, Env, Symbol};
+use soroban_sdk::{contract, contractclient, contracterror, contractimpl, panic_with_error, Address, Env, String, Symbol};
 
 use crate::types::{DataKey, PriceBounds, PriceData};
 
@@ -86,6 +86,12 @@ pub struct PriceAnomalyEvent {
     pub delta: u128,
 }
 
+#[soroban_sdk::contractevent]
+pub struct ContractInitialized {
+    pub admin: Address,
+    pub version: String,
+}
+
 /// Returns the signed percentage change in basis points.
 ///
 /// Example: 1_000_000 -> 1_200_000 returns 2_000 (20.00%).
@@ -129,13 +135,16 @@ pub fn is_stale(current_time: u64, stored_timestamp: u64, ttl: u64) -> bool {
     current_time >= stored_timestamp.saturating_add(ttl)
 }
 
+/// Contract version - must match Cargo.toml version
+const VERSION: &str = "0.0.0";
+
 #[contractimpl]
 impl PriceOracle {
     /// Initialize the contract with admin and base currency pairs.
     /// Can only be called once.
     pub fn initialize(env: Env, admin: Address, base_currency_pairs: soroban_sdk::Vec<Symbol>) {
         // Prevent double initialization
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
 
@@ -143,6 +152,12 @@ impl PriceOracle {
         env.events().publish(
             (Symbol::new(&env, "AdminChanged"),),
             admin.clone(),
+        );
+
+        // Emit ContractInitialized event to log when the Oracle goes live
+        env.events().publish(
+            (Symbol::new(&env, "ContractInitialized"),),
+            (admin.clone(), String::from_str(&env, VERSION)),
         );
 
         let admins = soroban_sdk::vec![&env, admin];
@@ -150,10 +165,13 @@ impl PriceOracle {
         env.storage()
             .instance()
             .set(&DataKey::BaseCurrencyPairs, &base_currency_pairs);
+        
+        // Mark contract as initialized
+        env.storage().instance().set(&DataKey::Initialized, &true);
     }
 
     pub fn init_admin(env: Env, admin: Address) {
-        if crate::auth::_has_admin(&env) {
+        if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
 
@@ -163,8 +181,16 @@ impl PriceOracle {
             admin.clone(),
         );
 
+        // Emit ContractInitialized event to log when the Oracle goes live
+        env.events().publish(
+            (Symbol::new(&env, "ContractInitialized"),),
+            (admin.clone(), String::from_str(&env, VERSION)),
+        );
+
         let admins = soroban_sdk::vec![&env, admin];
         crate::auth::_set_admin(&env, &admins);
+
+        env.storage().instance().set(&DataKey::Initialized, &true);
     }
 
     /// Return the current admin addresses.
