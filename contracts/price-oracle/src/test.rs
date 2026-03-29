@@ -8,7 +8,8 @@ use soroban_sdk::{
 };
 
 use crate::{
-    calculate_percentage_change_bps, calculate_percentage_difference_bps, is_stale,
+    calculate_percentage_change_bps, calculate_percentage_difference_bps,
+    calculate_price_volatility, is_stale,
     StellarFlowClient, Error,
 };
 
@@ -447,6 +448,50 @@ fn test_calculate_percentage_difference_bps_is_absolute() {
 fn test_calculate_percentage_change_returns_none_for_zero_baseline() {
     assert_eq!(calculate_percentage_change_bps(0, 1_000_000), None);
     assert_eq!(calculate_percentage_difference_bps(0, 1_000_000), None);
+}
+
+// ============================================================================
+// calculate_price_volatility tests (Circuit Breaker helper)
+// ============================================================================
+
+#[test]
+fn test_price_volatility_increase() {
+    assert_eq!(
+        calculate_price_volatility(1_000_000, 1_200_000),
+        Some(200_000)
+    );
+}
+
+#[test]
+fn test_price_volatility_decrease() {
+    assert_eq!(
+        calculate_price_volatility(1_200_000, 1_000_000),
+        Some(200_000)
+    );
+}
+
+#[test]
+fn test_price_volatility_no_change() {
+    assert_eq!(
+        calculate_price_volatility(500_000, 500_000),
+        Some(0)
+    );
+}
+
+#[test]
+fn test_price_volatility_from_zero() {
+    assert_eq!(
+        calculate_price_volatility(0, 1_000_000),
+        Some(1_000_000)
+    );
+}
+
+#[test]
+fn test_price_volatility_to_zero() {
+    assert_eq!(
+        calculate_price_volatility(1_000_000, 0),
+        Some(1_000_000)
+    );
 }
 
 #[test]
