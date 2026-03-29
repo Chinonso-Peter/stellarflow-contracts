@@ -1,8 +1,12 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractclient, contracterror, contractimpl, panic_with_error, Address, Env, Symbol};
+use soroban_sdk::{
+    contract, contractclient, contracterror, contractimpl, panic_with_error, Address, Env, Symbol,
+};
 
 use crate::types::{DataKey, PriceBounds, PriceData};
+
+const ADMIN_TIMELOCK: u64 = 86_400;
 
 /// A clean, gas-optimized interface for other Soroban contracts to fetch prices from StellarFlow.
 ///
@@ -33,22 +37,31 @@ pub trait StellarFlowTrait {
     ///
     /// Returns a `Vec<PriceEntry>` in the same order as the input symbols.
     /// Assets that are missing or stale are represented as `None` entries.
-    fn get_prices(env: Env, assets: soroban_sdk::Vec<Symbol>) -> soroban_sdk::Vec<Option<crate::types::PriceEntry>>;
+    fn get_prices(
+        env: Env,
+        assets: soroban_sdk::Vec<Symbol>,
+    ) -> soroban_sdk::Vec<Option<crate::types::PriceEntry>>;
 
     /// Get all currently tracked asset symbols.
     ///
     /// Returns a vector of all assets that have prices stored in the contract.
     fn get_all_assets(env: Env) -> soroban_sdk::Vec<Symbol>;
 
+    /// Get the total number of currently tracked asset symbols.
+    ///
+    /// Returns the number of unique assets that have prices stored in the contract.
+    fn get_asset_count(env: Env) -> u32;
+
     /// Get the current admin address.
     ///
     /// Returns the address of the contract administrator.
     fn get_admin(env: Env) -> Address;
 
-    /// Get the weight (0-100) assigned to a specific provider.
-    ///
-    /// Weights are used to prioritize data from specific providers in calculations.
-    fn get_provider_weight(env: Env, provider: Address) -> u32;
+    /// Start an admin transfer by setting a pending admin and timestamp.
+    fn transfer_admin(env: Env, current_admin: Address, new_admin: Address);
+
+    /// Finalize an admin transfer after the timelock has passed.
+    fn accept_admin(env: Env, new_admin: Address);
 }
 
 /// Error types for the price oracle contract
@@ -85,6 +98,20 @@ pub struct PriceUpdatedEvent {
     pub price: i128,
 }
 
+#[soroban_sdk::contractevent]
+pub struct PriceAnomalyEvent {
+    pub asset: Symbol,
+    pub previous_price: i128,
+    pub attempted_price: i128,
+    pub delta: u128,
+}
+
+#[soroban_sdk::contractevent]
+pub struct ContractInitialized {
+    pub admin: Address,
+    pub version: String,
+}
+
 /// Returns the signed percentage change in basis points.
 ///
 /// Example: 1_000_000 -> 1_200_000 returns 2_000 (20.00%).
@@ -108,8 +135,31 @@ pub fn calculate_percentage_difference_bps(old_price: i128, new_price: i128) -> 
     calculate_percentage_change_bps(old_price, new_price).map(i128::abs)
 }
 
+/// Returns the absolute difference between two price values.
+///
+/// Useful for circuit-breaker logic where the raw magnitude of the price move
+/// must be compared against a hard threshold. The result is always non-negative.
+///
+/// Returns `None` only when the subtraction would overflow (practically impossible
+/// for realistic price values).
+///
+/// # Examples
+/// ```text
+/// calculate_price_volatility(1_000_000, 1_200_000) => Some(200_000)
+/// calculate_price_volatility(1_200_000, 1_000_000) => Some(200_000)
+/// ```
+pub fn calculate_price_volatility(old_price: i128, new_price: i128) -> Option<i128> {
+    new_price
+        .checked_sub(old_price)
+        .map(|delta| delta.abs())
+}
+
 fn is_valid(price: i128) -> bool {
     price > 0
+}
+
+fn is_whitelisted_provider(env: &Env, source: &Address) -> bool {
+    crate::auth::_is_provider(env, source)
 }
 
 /// Check if a price entry is stale based on its TTL.
@@ -128,20 +178,26 @@ pub fn is_stale(current_time: u64, stored_timestamp: u64, ttl: u64) -> bool {
     current_time >= stored_timestamp.saturating_add(ttl)
 }
 
+/// Contract version - must match Cargo.toml version
+const VERSION: &str = "0.0.0";
+
 #[contractimpl]
 impl PriceOracle {
     /// Initialize the contract with admin and base currency pairs.
     /// Can only be called once.
     pub fn initialize(env: Env, admin: Address, base_currency_pairs: soroban_sdk::Vec<Symbol>) {
-        // Prevent double initialization
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
 
         #[allow(deprecated)]
+        env.events()
+            .publish((Symbol::new(&env, "AdminChanged"),), admin.clone());
+
+        // Emit ContractInitialized event to log when the Oracle goes live
         env.events().publish(
-            (Symbol::new(&env, "AdminChanged"),),
-            admin.clone(),
+            (Symbol::new(&env, "ContractInitialized"),),
+            (admin.clone(), String::from_str(&env, VERSION)),
         );
 
         let admins = soroban_sdk::vec![&env, admin];
@@ -149,21 +205,30 @@ impl PriceOracle {
         env.storage()
             .instance()
             .set(&DataKey::BaseCurrencyPairs, &base_currency_pairs);
+        
+        // Mark contract as initialized
+        env.storage().instance().set(&DataKey::Initialized, &true);
     }
 
     pub fn init_admin(env: Env, admin: Address) {
-        if crate::auth::_has_admin(&env) {
+        if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
 
         #[allow(deprecated)]
+        env.events()
+            .publish((Symbol::new(&env, "AdminChanged"),), admin.clone());
+
+        // Emit ContractInitialized event to log when the Oracle goes live
         env.events().publish(
-            (Symbol::new(&env, "AdminChanged"),),
-            admin.clone(),
+            (Symbol::new(&env, "ContractInitialized"),),
+            (admin.clone(), String::from_str(&env, VERSION)),
         );
 
         let admins = soroban_sdk::vec![&env, admin];
         crate::auth::_set_admin(&env, &admins);
+
+        env.storage().instance().set(&DataKey::Initialized, &true);
     }
 
     /// Return the current admin addresses.
@@ -173,8 +238,56 @@ impl PriceOracle {
             .expect("No admin set")
     }
 
+    /// Starts an admin transfer by storing the pending admin and timestamp.
+    pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) {
+        current_admin.require_auth();
+        crate::auth::_require_authorized(&env, &current_admin);
+
+        let now = env.ledger().timestamp();
+
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminTimestamp, &now);
+    }
+
+    /// Finalizes the admin transfer after the timelock expires.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .expect("No pending admin");
+
+        if pending != new_admin {
+            panic!("Not pending admin");
+        }
+
+        let timestamp: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminTimestamp)
+            .expect("No pending admin timestamp");
+
+        let now = env.ledger().timestamp();
+
+        if now < timestamp.saturating_add(ADMIN_TIMELOCK) {
+            panic!("Timelock not expired");
+        }
+
+        let admins = soroban_sdk::vec![&env, new_admin.clone()];
+        crate::auth::_set_admin(&env, &admins);
+
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminTimestamp);
+    }
+
     /// Get the price data for a specific asset.
-    /// Get the price data for a specific asset. Returns error if price is stale.
+    /// Returns error if price is stale.
     pub fn get_price(env: Env, asset: Symbol) -> Result<PriceData, Error> {
         let storage = env.storage().persistent();
         let prices: soroban_sdk::Map<Symbol, PriceData> = storage
@@ -183,10 +296,9 @@ impl PriceOracle {
 
         match prices.get(asset) {
             Some(price_data) => {
-                // Check if price is stale using per-asset TTL
                 let now = env.ledger().timestamp();
                 if is_stale(now, price_data.timestamp, price_data.ttl) {
-                    return Err(Error::AssetNotFound); // Could define a new error for StalePrice
+                    return Err(Error::AssetNotFound);
                 }
                 Ok(price_data)
             }
@@ -258,6 +370,16 @@ impl PriceOracle {
         prices.keys()
     }
 
+    /// Returns the total number of currently tracked asset symbols.
+    pub fn get_asset_count(env: Env) -> u32 {
+        let prices: soroban_sdk::Map<Symbol, PriceData> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PriceData)
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+        prices.len()
+    }
+
     /// Set the price data for a specific asset.
     ///
     /// # Arguments
@@ -272,7 +394,6 @@ impl PriceOracle {
             .get(&DataKey::PriceData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
 
-        // For demo/testing, set confidence_score to 100. In production, this should be provided as an argument.
         let price_data = PriceData {
             price: val,
             timestamp: env.ledger().timestamp(),
@@ -282,21 +403,21 @@ impl PriceOracle {
             ttl,
         };
 
-        prices.set(asset, price_data);
+        prices.set(asset.clone(), price_data);
         storage.set(&DataKey::PriceData, &prices);
+
+        // Emit AssetAdded event only when a new asset is added (not on updates)
+        if is_new_asset {
+            env.events().publish_event(&AssetAddedEvent {
+                symbol: asset,
+            });
+        }
     }
 
     /// Upgrade the contract WASM code.
     ///
     /// Replaces the on-chain WASM bytecode with the provided hash while preserving
     /// all contract storage. Strictly restricted to the admin.
-    ///
-    /// # Arguments
-    /// * `admin`    - The current admin address (must sign the transaction)
-    /// * `new_wasm_hash` - The hash of the new WASM blob already uploaded to the ledger
-    ///
-    /// # Panics
-    /// If `admin` is not the current contract admin.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
@@ -306,7 +427,7 @@ impl PriceOracle {
     /// Remove an asset from the oracle, deleting its price entry.
     ///
     /// Only the admin can call this. Returns `Error::AssetNotFound` if the asset
-    /// is not currently tracked. Frees ledger space for decommissioned pairs.
+    /// is not currently tracked.
     pub fn remove_asset(env: Env, admin: Address, asset: Symbol) -> Result<(), Error> {
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
@@ -327,21 +448,6 @@ impl PriceOracle {
     }
 
     /// Update the price for a specific asset (authorized backend relayer function)
-    ///
-    /// # Arguments
-    /// * `env` - The contract environment
-    /// * `source` - The address of the authorized backend relayer
-    /// * `asset` - The asset symbol to update
-    /// * `price` - The new price (as i128)
-    /// * `decimals` - Number of decimals for the price
-    /// * `confidence_score` - Confidence score for this price update
-    /// * `ttl` - Time-to-live in seconds for this price (per-asset expiration)
-    ///
-    /// # Errors
-    /// * `Error::InvalidAssetSymbol` - If `asset` is not NGN, KES, or GHS
-    ///
-    /// # Panics
-    /// If `source` is not a whitelisted provider or if the contract is paused.
     pub fn update_price(
         env: Env,
         source: Address,
@@ -361,7 +467,7 @@ impl PriceOracle {
             return Err(Error::InvalidPrice);
         }
 
-        if !crate::auth::_is_provider(&env, &source) {
+        if !is_whitelisted_provider(&env, &source) {
             return Err(Error::NotAuthorized);
         }
 
@@ -375,16 +481,19 @@ impl PriceOracle {
             .map(|existing_price| existing_price.price)
             .unwrap_or(0);
 
-        // Delta limit circuit breaker: reject if price moves more than 50 in one update.
-        // Skip on first write (old_price == 0).
         if old_price != 0 {
             let delta = (price - old_price).unsigned_abs();
             if delta > 50 {
-                return Err(Error::PriceDeltaExceeded);
+                env.events().publish_event(&PriceAnomalyEvent {
+                    asset: asset.clone(),
+                    previous_price: old_price,
+                    attempted_price: price,
+                    delta,
+                });
+                return Ok(());
             }
         }
 
-        // Min/max bounds check: reject prices outside configured bounds.
         let bounds_map: soroban_sdk::Map<Symbol, PriceBounds> = storage
             .get(&DataKey::PriceBoundsData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
@@ -407,24 +516,12 @@ impl PriceOracle {
         prices.set(asset.clone(), price_data);
         storage.set(&DataKey::PriceData, &prices);
 
-        env.events().publish_event(&PriceUpdatedEvent {
-            asset,
-            price,
-        });
+        env.events().publish_event(&PriceUpdatedEvent { asset, price });
 
         Ok(())
     }
 
     /// Set the min/max price bounds for an asset.
-    ///
-    /// Only the admin can call this. Any subsequent `update_price` call for the
-    /// asset will be rejected if the price falls outside `[min_price, max_price]`.
-    ///
-    /// # Arguments
-    /// * `admin`     - The current admin address (must sign)
-    /// * `asset`     - The asset symbol to configure bounds for
-    /// * `min_price` - The minimum acceptable price (inclusive)
-    /// * `max_price` - The maximum acceptable price (inclusive)
     pub fn set_price_bounds(
         env: Env,
         admin: Address,
