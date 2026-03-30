@@ -1,9 +1,10 @@
 #![no_std]
 use soroban_sdk::{contractimpl, vec, Env, String, Vec};
 
-pub mod types;
+use soroban_sdk::contract;
 
-pub use crate::types::*;
+#[contract]
+pub struct Contract;
 
 // This is a sample contract. Replace this placeholder with your own contract logic.
 // A corresponding test example is available in `test.rs`.
