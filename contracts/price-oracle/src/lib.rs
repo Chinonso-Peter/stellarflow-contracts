@@ -83,6 +83,11 @@ pub trait StellarFlowTrait {
     /// Useful for the frontend and backend to verify they are talking to the
     /// correct version of the oracle and to track contract compatibility.
     fn get_ledger_version(env: Env) -> u32;
+
+    /// Get the human-readable name of this contract.
+    ///
+    /// Returns a static string identifying the oracle contract.
+    fn get_contract_name(env: Env) -> String;
 }
 
 /// Error types for the price oracle contract
@@ -711,6 +716,13 @@ impl PriceOracle {
     /// Useful for the frontend and backend to verify contract compatibility.
     pub fn get_ledger_version(env: Env) -> u32 {
         env.ledger().sequence()
+    }
+
+    /// Get the human-readable name of this contract.
+    ///
+    /// Returns a static string identifying the oracle contract.
+    pub fn get_contract_name(env: Env) -> String {
+        String::from_str(&env, "StellarFlow Africa Oracle")
     }
 
     /// Get the last N activity events from the on-chain log.
