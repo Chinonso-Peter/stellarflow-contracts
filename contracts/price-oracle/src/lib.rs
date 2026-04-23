@@ -77,6 +77,12 @@ pub trait StellarFlowTrait {
     ///
     /// Returns a vector of the most recent events (max 5).
     fn get_last_n_events(env: Env, n: u32) -> soroban_sdk::Vec<RecentEvent>;
+
+    /// Get the current ledger sequence number.
+    ///
+    /// Useful for the frontend and backend to verify they are talking to the
+    /// correct version of the oracle and to track contract compatibility.
+    fn get_ledger_version(env: Env) -> u32;
 }
 
 /// Error types for the price oracle contract
@@ -697,6 +703,14 @@ impl PriceOracle {
             .get(&DataKey::PriceBoundsData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
         bounds_map.get(asset)
+    }
+
+    /// Get the current ledger sequence number.
+    ///
+    /// Returns the ledger sequence number at the time of the call.
+    /// Useful for the frontend and backend to verify contract compatibility.
+    pub fn get_ledger_version(env: Env) -> u32 {
+        env.ledger().sequence()
     }
 
     /// Get the last N activity events from the on-chain log.
