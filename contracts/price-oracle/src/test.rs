@@ -84,6 +84,16 @@ fn test_initialize_success() {
 }
 
 #[test]
+fn test_get_ledger_version_returns_sequence() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(42);
+    assert_eq!(client.get_ledger_version(), 42);
+}
+
+#[test]
 #[should_panic]
 fn test_initialize_double_panics() {
     let env = Env::default();
