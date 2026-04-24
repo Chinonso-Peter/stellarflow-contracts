@@ -6,7 +6,12 @@ pub enum DataKey {
     Admin,
     BaseCurrencyPairs,
     PriceData,
-    AssetDescription(Symbol),
+    PriceBoundsData,
+    PendingAdmin,
+    PendingAdminTimestamp,
+    AdminUpdateTimestamp,
+    RecentEvents,
+    Initialized,
 }
 
 /// Canonical storage format for a price entry.
@@ -31,6 +36,42 @@ pub struct PriceData {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PriceEntry {
+    pub price: i128,
+    pub timestamp: u64,
+    pub decimals: u32,
+}
+
+/// Full price payload returned to consumers with freshness status.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceDataWithStatus {
+    pub data: PriceData,
+    pub is_stale: bool,
+}
+
+/// Lightweight price payload returned to consumers with freshness status.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceEntryWithStatus {
+    pub price: i128,
+    pub timestamp: u64,
+    pub is_stale: bool,
+}
+
+/// Min/max price bounds for an asset to prevent fat-finger errors.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceBounds {
+    pub min_price: i128,
+    pub max_price: i128,
+}
+
+/// A recent activity event for the dashboard feed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecentEvent {
+    pub event_type: soroban_sdk::Symbol,
+    pub asset: soroban_sdk::Symbol,
     pub price: i128,
     pub timestamp: u64,
 }

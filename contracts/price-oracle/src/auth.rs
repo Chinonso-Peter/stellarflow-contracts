@@ -8,6 +8,7 @@ use soroban_sdk::{contracttype, Address, Env, Vec};
 pub enum DataKey {
     Admin,
     Provider(Address),
+    ProviderWeight(Address),
     IsPaused,
 }
 
@@ -74,6 +75,15 @@ pub fn _remove_authorized(env: &Env, admin_to_remove: &Address) {
     }
 }
 
+/// Permanently renounce ownership by deleting all admin keys from storage.
+///
+/// After this call, no address will be authorized as admin and all admin-only
+/// functions will be permanently inaccessible. This makes the contract
+/// immutable and controlled only by code logic.
+pub fn _renounce_ownership(env: &Env) {
+    env.storage().instance().remove(&DataKey::Admin);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pause Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,6 +130,19 @@ pub fn _require_provider(env: &Env, caller: &Address) {
     if !_is_provider(env, caller) {
         panic!("Unauthorised: caller is not a whitelisted provider");
     }
+}
+
+pub fn _set_provider_weight(env: &Env, provider: &Address, weight: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ProviderWeight(provider.clone()), &weight);
+}
+
+pub fn _get_provider_weight(env: &Env, provider: &Address) -> u32 {
+    env.storage()
+        .instance()
+        .get::<DataKey, u32>(&DataKey::ProviderWeight(provider.clone()))
+        .unwrap_or(0)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -382,6 +405,60 @@ mod auth_tests {
         env.as_contract(&contract_id, || {
             assert!(_is_authorized(&env, &admin));
             assert!(!_is_provider(&env, &admin));
+        });
+    }
+
+    #[test]
+    fn test_set_and_get_provider_weight() {
+        let (env, contract_id, _) = setup();
+        let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        env.as_contract(&contract_id, || {
+            _add_provider(&env, &provider);
+            assert_eq!(_get_provider_weight(&env, &provider), 0);
+            
+            _set_provider_weight(&env, &provider, 75);
+            assert_eq!(_get_provider_weight(&env, &provider), 75);
+            
+            _set_provider_weight(&env, &provider, 100);
+            assert_eq!(_get_provider_weight(&env, &provider), 100);
+        });
+    }
+
+    #[test]
+    fn test_weight_for_nonexistent_provider_is_zero() {
+        let (env, contract_id, _) = setup();
+        let random = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(_get_provider_weight(&env, &random), 0);
+        });
+    }
+
+    // ── Renounce ownership tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_renounce_ownership_removes_all_admins() {
+        let (env, contract_id, admin1) = setup();
+        let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        env.as_contract(&contract_id, || {
+            _add_authorized(&env, &admin2);
+            assert_eq!(_get_admin(&env).len(), 2);
+            assert!(_has_admin(&env));
+
+            _renounce_ownership(&env);
+
+            assert!(!_has_admin(&env));
+        });
+    }
+
+    #[test]
+    fn test_renounce_ownership_makes_is_authorized_false() {
+        let (env, contract_id, admin) = setup();
+        env.as_contract(&contract_id, || {
+            assert!(_is_authorized(&env, &admin));
+
+            _renounce_ownership(&env);
+
+            assert!(!_is_authorized(&env, &admin));
         });
     }
 }
