@@ -21,6 +21,11 @@ pub trait StellarFlowTrait {
     /// Returns `Error::AssetNotFound` if the asset does not exist or the price is stale.
     fn get_price(env: Env, asset: Symbol) -> Result<PriceData, Error>;
 
+    /// Get the full price data with freshness status for a specific asset.
+    ///
+    /// Returns the last known price with `is_stale = true` when the price has expired.
+    fn get_price_with_status(env: Env, asset: Symbol) -> Result<PriceDataWithStatus, Error>;
+
     /// Get the price data for a specific asset, or `None` if not found.
     ///
     /// Unlike `get_price`, this does not error on stale or missing prices.
@@ -73,6 +78,13 @@ pub trait StellarFlowTrait {
     /// Finalize an admin transfer after the timelock has passed.
     fn accept_admin(env: Env, new_admin: Address);
 
+    /// Permanently renounce ownership of the contract.
+    ///
+    /// This deletes all admin keys from storage, making the contract immutable.
+    /// No admin-only functions (upgrade, add_asset, set_price_bounds, etc.)
+    /// will ever be callable again. This action is irreversible.
+    fn renounce_ownership(env: Env, admin: Address);
+
     /// Get the last N activity events from the on-chain log.
     ///
     /// Returns a vector of the most recent events (max 5).
@@ -83,7 +95,35 @@ pub trait StellarFlowTrait {
     /// Useful for the frontend and backend to verify they are talking to the
     /// correct version of the oracle and to track contract compatibility.
     fn get_ledger_version(env: Env) -> u32;
+
+    /// Get the human-readable name of this contract.
+    ///
+    /// Returns a static string identifying the oracle contract.
+    fn get_contract_name(env: Env) -> String;
+
+    /// Toggle the pause state of the contract (requires 2-of-3 admin signatures).
+    ///
+    /// This function prevents a single compromised admin key from shutting down
+    /// the network. At least 2 out of 3 registered admins must authorize this action.
+    fn toggle_pause(env: Env, admin1: Address, admin2: Address) -> Result<bool, Error>;
+
+    /// Register a new admin (requires 2-of-3 existing admin signatures).
+    ///
+    /// Maximum of 3 admins allowed. Returns error if already at capacity.
+    fn register_admin(env: Env, admin1: Address, admin2: Address, new_admin: Address) -> Result<(), Error>;
+
+    /// Remove an admin (requires 2-of-3 existing admin signatures).
+    ///
+    /// Cannot remove the last admin. Returns error if would leave 0 admins.
+    fn remove_admin(env: Env, admin1: Address, admin2: Address, admin_to_remove: Address) -> Result<(), Error>;
+
+    /// Get the total number of registered admins.
+    fn get_admin_count(env: Env) -> u32;
 }
+
+/// Maximum allowed percentage change between price updates (10% = 1000 basis points).
+/// Any price update exceeding this threshold will be rejected to prevent flash crashes.
+const MAX_PERCENT_CHANGE_BPS: i128 = 1_000;
 
 /// Error types for the price oracle contract
 #[contracterror]
@@ -98,6 +138,8 @@ pub enum Error {
     InvalidAssetSymbol = 3,
     /// Price must be greater than zero.
     InvalidPrice = 4,
+    /// Price change exceeds maximum allowed threshold (flash crash protection).
+    FlashCrashDetected = 5,
     /// Caller is not authorized to perform this action.
     NotAuthorized = 5,
     /// Contract or admin has already been initialized.
@@ -108,6 +150,12 @@ pub enum Error {
     PriceOutOfBounds = 8,
     /// Provider weight must be between 0 and 100.
     InvalidWeight = 9,
+    /// Multi-signature validation failed - insufficient or invalid admin signatures.
+    MultiSigValidationFailed = 10,
+    /// Cannot add more admins - maximum of 3 admins allowed.
+    MaxAdminsReached = 11,
+    /// Cannot remove admin - would leave contract without any admins.
+    CannotRemoveLastAdmin = 12,
 }
 
 #[contract]
@@ -136,6 +184,11 @@ pub struct ContractInitialized {
 #[soroban_sdk::contractevent]
 pub struct AssetAddedEvent {
     pub symbol: Symbol,
+}
+
+#[soroban_sdk::contractevent]
+pub struct OwnershipRenouncedEvent {
+    pub previous_admin: Address,
 }
 
 /// Returns the signed percentage change in basis points.
@@ -394,6 +447,22 @@ impl PriceOracle {
             .remove(&DataKey::PendingAdminTimestamp);
     }
 
+    /// Permanently renounce ownership of the contract.
+    ///
+    /// This deletes all admin keys from storage, making the contract immutable.
+    /// No admin-only functions (upgrade, add_asset, set_price_bounds, etc.)
+    /// will ever be callable again. This action is irreversible.
+    pub fn renounce_ownership(env: Env, admin: Address) {
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+
+        crate::auth::_renounce_ownership(&env);
+
+        env.events().publish_event(&OwnershipRenouncedEvent {
+            previous_admin: admin,
+        });
+    }
+
     /// A low-gas health check to verify the contract is responding.
     ///
     /// Returns a simple "PONG" symbol with minimal gas consumption.
@@ -417,6 +486,26 @@ impl PriceOracle {
                     return Err(Error::AssetNotFound);
                 }
                 Ok(price_data)
+            }
+            None => Err(Error::AssetNotFound),
+        }
+    }
+
+    /// Returns the last known price data and marks it stale when TTL has expired.
+    pub fn get_price_with_status(env: Env, asset: Symbol) -> Result<PriceDataWithStatus, Error> {
+        let prices: soroban_sdk::Map<Symbol, PriceData> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PriceData)
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+
+        match prices.get(asset) {
+            Some(price_data) => {
+                let now = env.ledger().timestamp();
+                Ok(PriceDataWithStatus {
+                    is_stale: is_stale(now, price_data.timestamp, price_data.ttl),
+                    data: price_data,
+                })
             }
             None => Err(Error::AssetNotFound),
         }
@@ -476,6 +565,32 @@ impl PriceOracle {
         result
     }
 
+    /// Returns prices for all found assets and marks stale entries with `is_stale = true`.
+    pub fn get_prices_with_status(
+        env: Env,
+        assets: soroban_sdk::Vec<Symbol>,
+    ) -> soroban_sdk::Vec<Option<PriceEntryWithStatus>> {
+        let prices: soroban_sdk::Map<Symbol, PriceData> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PriceData)
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+
+        let now = env.ledger().timestamp();
+        let mut result = soroban_sdk::Vec::new(&env);
+
+        for asset in assets.iter() {
+            let entry = prices.get(asset).map(|pd| PriceEntryWithStatus {
+                price: pd.price,
+                timestamp: pd.timestamp,
+                is_stale: is_stale(now, pd.timestamp, pd.ttl),
+            });
+            result.push_back(entry);
+        }
+
+        result
+    }
+
     /// Returns a vector of all currently tracked asset symbols.
     pub fn get_all_assets(env: Env) -> soroban_sdk::Vec<Symbol> {
         get_tracked_assets(&env)
@@ -501,7 +616,11 @@ impl PriceOracle {
     /// * `decimals` - Number of decimals for the price
     /// * `ttl` - Time-to-live in seconds for this price (per-asset expiration)
     pub fn set_price(env: Env, asset: Symbol, val: i128, decimals: u32, ttl: u64) {
-        let storage = env.storage().temporary();
+        if !is_valid(val) {
+            panic_with_error!(&env, Error::InvalidPrice);
+        }
+
+        let storage = env.storage().persistent();
         let mut prices: soroban_sdk::Map<Symbol, PriceData> = storage
             .get(&DataKey::PriceData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
@@ -547,6 +666,27 @@ impl PriceOracle {
         } else {
             log_event(&env, Symbol::new(&env, "price_updated"), asset, val);
         }
+    }
+
+    /// Rescue tokens accidentally sent to this contract.
+    ///
+    /// Admin-only function to move trapped XLM or other assets out of the contract.
+    pub fn rescue_tokens(env: Env, admin: Address, token: Address, to: Address, amount: i128) {
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+
+        if amount <= 0 {
+            panic_with_error!(&env, Error::InvalidPrice);
+        }
+
+        let token_client = TokenContractClient::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &to, &amount);
+
+        env.events().publish_event(&RescueTokensEvent {
+            token,
+            recipient: to,
+            amount,
+        });
     }
 
     /// Upgrade the contract WASM code.
@@ -625,6 +765,12 @@ impl PriceOracle {
             .map(|existing_price| existing_price.price)
             .unwrap_or(0);
 
+        // Flash crash protection: reject if price change exceeds MAX_PERCENT_CHANGE
+        if old_price > 0 {
+            if let Some(pct_change_bps) = calculate_percentage_difference_bps(old_price, price) {
+                if pct_change_bps > MAX_PERCENT_CHANGE_BPS {
+                    return Err(Error::FlashCrashDetected);
+                }
         if old_price != 0 {
             let delta = (price - old_price).unsigned_abs();
             if delta > 50 {
@@ -714,6 +860,13 @@ impl PriceOracle {
         env.ledger().sequence()
     }
 
+    /// Get the human-readable name of this contract.
+    ///
+    /// Returns a static string identifying the oracle contract.
+    pub fn get_contract_name(env: Env) -> String {
+        String::from_str(&env, "StellarFlow Africa Oracle")
+    }
+
     /// Get the last N activity events from the on-chain log.
     pub fn get_last_n_events(env: Env, n: u32) -> soroban_sdk::Vec<RecentEvent> {
         let events: soroban_sdk::Vec<RecentEvent> = env
@@ -732,6 +885,155 @@ impl PriceOracle {
         }
 
         result
+    }
+
+    /// Toggle the pause state of the contract (requires 2-of-3 admin signatures).
+    ///
+    /// This function prevents a single compromised admin key from shutting down
+    /// the network. At least 2 out of 3 registered admins must authorize this action.
+    ///
+    /// # Arguments
+    /// * `admin1` - First admin address (must provide auth)
+    /// * `admin2` - Second admin address (must provide auth)
+    ///
+    /// # Returns
+    /// The new pause state (true = paused, false = unpaused)
+    pub fn toggle_pause(env: Env, admin1: Address, admin2: Address) -> Result<bool, Error> {
+        // Require both admins to provide cryptographic signatures
+        admin1.require_auth();
+        admin2.require_auth();
+
+        // Verify both are distinct addresses
+        if admin1 == admin2 {
+            return Err(Error::MultiSigValidationFailed);
+        }
+
+        // Verify both are authorized admins
+        crate::auth::_require_authorized(&env, &admin1);
+        crate::auth::_require_authorized(&env, &admin2);
+
+        // Get current admin list
+        let admins = crate::auth::_get_admin(&env);
+        let admin_count = admins.len();
+
+        // Ensure we have at least 2 admins registered
+        if admin_count < 2 {
+            return Err(Error::MultiSigValidationFailed);
+        }
+
+        // Toggle the pause state
+        let current_paused = crate::auth::_is_paused(&env);
+        let new_paused = !current_paused;
+        crate::auth::_set_paused(&env, new_paused);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "pause_toggled"),),
+            (admin1.clone(), admin2.clone(), new_paused),
+        );
+
+        Ok(new_paused)
+    }
+
+    /// Register a new admin (requires 2-of-3 existing admin signatures).
+    ///
+    /// # Arguments
+    /// * `admin1` - First admin address (must provide auth)
+    /// * `admin2` - Second admin address (must provide auth)
+    /// * `new_admin` - The new admin to register
+    ///
+    /// # Returns
+    /// Ok(()) if successful, Error if validation fails
+    pub fn register_admin(env: Env, admin1: Address, admin2: Address, new_admin: Address) -> Result<(), Error> {
+        // Require both existing admins to provide cryptographic signatures
+        admin1.require_auth();
+        admin2.require_auth();
+
+        // Verify both are distinct addresses
+        if admin1 == admin2 {
+            return Err(Error::MultiSigValidationFailed);
+        }
+
+        // Verify both are authorized admins
+        crate::auth::_require_authorized(&env, &admin1);
+        crate::auth::_require_authorized(&env, &admin2);
+
+        // Get current admin list
+        let admins = crate::auth::_get_admin(&env);
+        let admin_count = admins.len();
+
+        // Check if we've reached the maximum of 3 admins
+        if admin_count >= 3 {
+            return Err(Error::MaxAdminsReached);
+        }
+
+        // Add the new admin
+        crate::auth::_add_authorized(&env, &new_admin);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "admin_registered"),),
+            (admin1.clone(), admin2.clone(), new_admin.clone()),
+        );
+
+        Ok(())
+    }
+
+    /// Remove an admin (requires 2-of-3 existing admin signatures).
+    ///
+    /// # Arguments
+    /// * `admin1` - First admin address (must provide auth)
+    /// * `admin2` - Second admin address (must provide auth)
+    /// * `admin_to_remove` - The admin to remove
+    ///
+    /// # Returns
+    /// Ok(()) if successful, Error if validation fails
+    pub fn remove_admin(env: Env, admin1: Address, admin2: Address, admin_to_remove: Address) -> Result<(), Error> {
+        // Require both existing admins to provide cryptographic signatures
+        admin1.require_auth();
+        admin2.require_auth();
+
+        // Verify both are distinct addresses
+        if admin1 == admin2 {
+            return Err(Error::MultiSigValidationFailed);
+        }
+
+        // Verify both are authorized admins
+        crate::auth::_require_authorized(&env, &admin1);
+        crate::auth::_require_authorized(&env, &admin2);
+
+        // Get current admin list
+        let admins = crate::auth::_get_admin(&env);
+        let admin_count = admins.len();
+
+        // Cannot remove if would leave less than 1 admin
+        if admin_count <= 1 {
+            return Err(Error::CannotRemoveLastAdmin);
+        }
+
+        // Verify the admin to remove actually exists
+        if !admins.iter().any(|a| a == admin_to_remove) {
+            return Err(Error::NotAuthorized);
+        }
+
+        // Remove the admin
+        crate::auth::_remove_authorized(&env, &admin_to_remove);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "admin_removed"),),
+            (admin1.clone(), admin2.clone(), admin_to_remove.clone()),
+        );
+
+        Ok(())
+    }
+
+    /// Get the total number of registered admins.
+    pub fn get_admin_count(env: Env) -> u32 {
+        if !crate::auth::_has_admin(&env) {
+            return 0;
+        }
+        crate::auth::_get_admin(&env).len()
     }
 }
 
