@@ -102,6 +102,10 @@ pub trait StellarFlowTrait {
     fn get_contract_name(env: Env) -> String;
 }
 
+/// Maximum allowed percentage change between price updates (10% = 1000 basis points).
+/// Any price update exceeding this threshold will be rejected to prevent flash crashes.
+const MAX_PERCENT_CHANGE_BPS: i128 = 1_000;
+
 /// Error types for the price oracle contract
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -115,6 +119,8 @@ pub enum Error {
     InvalidAssetSymbol = 3,
     /// Price must be greater than zero.
     InvalidPrice = 4,
+    /// Price change exceeds maximum allowed threshold (flash crash protection).
+    FlashCrashDetected = 5,
     /// Caller is not authorized to perform this action.
     NotAuthorized = 5,
     /// Contract or admin has already been initialized.
@@ -733,6 +739,12 @@ impl PriceOracle {
             .map(|existing_price| existing_price.price)
             .unwrap_or(0);
 
+        // Flash crash protection: reject if price change exceeds MAX_PERCENT_CHANGE
+        if old_price > 0 {
+            if let Some(pct_change_bps) = calculate_percentage_difference_bps(old_price, price) {
+                if pct_change_bps > MAX_PERCENT_CHANGE_BPS {
+                    return Err(Error::FlashCrashDetected);
+                }
         if old_price != 0 {
             let delta = (price - old_price).unsigned_abs();
             if delta > 50 {
