@@ -331,7 +331,7 @@ fn test_add_asset_initializes_zero_price_and_tracks_symbol() {
     });
 
     let asset = symbol_short!("ZAR");
-    client.add_asset(&admin, &asset).unwrap();
+    client.add_asset(&admin, &asset);
 
     let assets = client.get_all_assets();
     assert!(assets.contains(&asset));
@@ -358,7 +358,7 @@ fn test_add_asset_non_admin_is_rejected() {
     });
 
     let asset = symbol_short!("ZAR");
-    client.add_asset(&non_admin, &asset).unwrap();
+    client.add_asset(&non_admin, &asset);
 }
 
 #[test]
@@ -418,6 +418,8 @@ fn test_update_price_provider_can_store_new_price() {
         crate::auth::_add_provider(&env, &provider);
     });
 
+    client.add_asset(&admin, &asset);
+
     env.ledger().set_timestamp(1_700_000_500);
     env.ledger().set_sequence_number(2);
     client.update_price(&provider, &asset, &1_500_000_i128, &6u32, &100u32, &3600u64);
@@ -445,6 +447,8 @@ fn test_update_price_multiple_updates() {
         crate::auth::_add_provider(&env, &provider);
     });
 
+    client.add_asset(&admin, &asset);
+
     client.update_price(&provider, &asset, &1_000_i128, &6u32, &100u32, &3600u64);
     client.update_price(&provider, &asset, &1_020_i128, &6u32, &100u32, &3600u64);
 
@@ -462,14 +466,17 @@ fn test_update_price_admin_authority() {
 
     let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
     let unauthorized_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let asset = symbol_short!("NGN");
 
     env.as_contract(&contract_id, || {
         crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
     });
 
+    client.add_asset(&admin, &asset);
+
     let result = client.try_update_price(
         &unauthorized_address,
-        &symbol_short!("NGN"),
+        &asset,
         &50_000_000_000_i128,
         &8u32,
         &100u32,
@@ -568,6 +575,8 @@ fn test_update_price_emits_event() {
         crate::auth::_add_provider(&env, &provider);
     });
 
+    client.add_asset(&admin, &asset);
+
     env.ledger().set_timestamp(1_700_000_000);
     env.ledger().set_sequence_number(1);
     client.update_price(&provider, &asset, &price, &6u32, &100u32, &3600u64);
@@ -593,6 +602,8 @@ fn test_update_price_delta_limit_rejection_emits_anomaly_event() {
         crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
         crate::auth::_add_provider(&env, &provider);
     });
+
+    client.add_asset(&admin, &asset);
 
     env.ledger().set_timestamp(1_700_100_000);
     env.ledger().set_sequence_number(1);
@@ -1250,6 +1261,8 @@ fn test_flash_crash_protection_allows_exact_threshold() {
         crate::auth::_add_provider(&env, &provider);
     });
 
+    client.add_asset(&admin, &asset);
+
     // Set bounds: 500 to 2000
     client.set_price_bounds(&admin, &asset, &500_i128, &2_000_i128);
 
@@ -1300,6 +1313,8 @@ fn test_flash_crash_protection_allows_first_price_update() {
         crate::auth::_add_provider(&env, &provider);
     });
 
+    client.add_asset(&admin, &asset);
+
     // Set bounds: 500 to 2000
     client.set_price_bounds(&admin, &asset, &500_i128, &2_000_i128);
 
@@ -1327,6 +1342,8 @@ fn test_update_price_above_max_bound_rejected() {
         crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
         crate::auth::_add_provider(&env, &provider);
     });
+
+    client.add_asset(&admin, &asset);
 
     // Set bounds: 500 to 2000
     client.set_price_bounds(&admin, &asset, &500_i128, &2_000_i128);
@@ -1374,6 +1391,8 @@ fn test_flash_crash_protection_rejects_just_over_threshold() {
         crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
         crate::auth::_add_provider(&env, &provider);
     });
+
+    client.add_asset(&admin, &asset);
 
     // Set bounds: 500 to 2000
     client.set_price_bounds(&admin, &asset, &500_i128, &2_000_i128);
@@ -1423,6 +1442,8 @@ fn test_update_price_no_bounds_set_allows_any_valid_price() {
         crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
         crate::auth::_add_provider(&env, &provider);
     });
+
+    client.add_asset(&admin, &asset);
 
     // No bounds set — should accept any positive price
     let result = client.try_update_price(&provider, &asset, &999_999_999_i128, &6u32, &100u32, &3600u64);
