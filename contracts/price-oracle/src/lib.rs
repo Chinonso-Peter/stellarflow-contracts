@@ -95,6 +95,25 @@ pub trait StellarFlowTrait {
     ///
     /// Returns a static string identifying the oracle contract.
     fn get_contract_name(env: Env) -> String;
+
+    /// Toggle the pause state of the contract (requires 2-of-3 admin signatures).
+    ///
+    /// This function prevents a single compromised admin key from shutting down
+    /// the network. At least 2 out of 3 registered admins must authorize this action.
+    fn toggle_pause(env: Env, admin1: Address, admin2: Address) -> Result<bool, Error>;
+
+    /// Register a new admin (requires 2-of-3 existing admin signatures).
+    ///
+    /// Maximum of 3 admins allowed. Returns error if already at capacity.
+    fn register_admin(env: Env, admin1: Address, admin2: Address, new_admin: Address) -> Result<(), Error>;
+
+    /// Remove an admin (requires 2-of-3 existing admin signatures).
+    ///
+    /// Cannot remove the last admin. Returns error if would leave 0 admins.
+    fn remove_admin(env: Env, admin1: Address, admin2: Address, admin_to_remove: Address) -> Result<(), Error>;
+
+    /// Get the total number of registered admins.
+    fn get_admin_count(env: Env) -> u32;
 }
 
 /// Error types for the price oracle contract
@@ -120,6 +139,12 @@ pub enum Error {
     PriceOutOfBounds = 8,
     /// Provider weight must be between 0 and 100.
     InvalidWeight = 9,
+    /// Multi-signature validation failed - insufficient or invalid admin signatures.
+    MultiSigValidationFailed = 10,
+    /// Cannot add more admins - maximum of 3 admins allowed.
+    MaxAdminsReached = 11,
+    /// Cannot remove admin - would leave contract without any admins.
+    CannotRemoveLastAdmin = 12,
 }
 
 #[contract]
@@ -796,6 +821,155 @@ impl PriceOracle {
         }
 
         result
+    }
+
+    /// Toggle the pause state of the contract (requires 2-of-3 admin signatures).
+    ///
+    /// This function prevents a single compromised admin key from shutting down
+    /// the network. At least 2 out of 3 registered admins must authorize this action.
+    ///
+    /// # Arguments
+    /// * `admin1` - First admin address (must provide auth)
+    /// * `admin2` - Second admin address (must provide auth)
+    ///
+    /// # Returns
+    /// The new pause state (true = paused, false = unpaused)
+    pub fn toggle_pause(env: Env, admin1: Address, admin2: Address) -> Result<bool, Error> {
+        // Require both admins to provide cryptographic signatures
+        admin1.require_auth();
+        admin2.require_auth();
+
+        // Verify both are distinct addresses
+        if admin1 == admin2 {
+            return Err(Error::MultiSigValidationFailed);
+        }
+
+        // Verify both are authorized admins
+        crate::auth::_require_authorized(&env, &admin1);
+        crate::auth::_require_authorized(&env, &admin2);
+
+        // Get current admin list
+        let admins = crate::auth::_get_admin(&env);
+        let admin_count = admins.len();
+
+        // Ensure we have at least 2 admins registered
+        if admin_count < 2 {
+            return Err(Error::MultiSigValidationFailed);
+        }
+
+        // Toggle the pause state
+        let current_paused = crate::auth::_is_paused(&env);
+        let new_paused = !current_paused;
+        crate::auth::_set_paused(&env, new_paused);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "pause_toggled"),),
+            (admin1.clone(), admin2.clone(), new_paused),
+        );
+
+        Ok(new_paused)
+    }
+
+    /// Register a new admin (requires 2-of-3 existing admin signatures).
+    ///
+    /// # Arguments
+    /// * `admin1` - First admin address (must provide auth)
+    /// * `admin2` - Second admin address (must provide auth)
+    /// * `new_admin` - The new admin to register
+    ///
+    /// # Returns
+    /// Ok(()) if successful, Error if validation fails
+    pub fn register_admin(env: Env, admin1: Address, admin2: Address, new_admin: Address) -> Result<(), Error> {
+        // Require both existing admins to provide cryptographic signatures
+        admin1.require_auth();
+        admin2.require_auth();
+
+        // Verify both are distinct addresses
+        if admin1 == admin2 {
+            return Err(Error::MultiSigValidationFailed);
+        }
+
+        // Verify both are authorized admins
+        crate::auth::_require_authorized(&env, &admin1);
+        crate::auth::_require_authorized(&env, &admin2);
+
+        // Get current admin list
+        let admins = crate::auth::_get_admin(&env);
+        let admin_count = admins.len();
+
+        // Check if we've reached the maximum of 3 admins
+        if admin_count >= 3 {
+            return Err(Error::MaxAdminsReached);
+        }
+
+        // Add the new admin
+        crate::auth::_add_authorized(&env, &new_admin);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "admin_registered"),),
+            (admin1.clone(), admin2.clone(), new_admin.clone()),
+        );
+
+        Ok(())
+    }
+
+    /// Remove an admin (requires 2-of-3 existing admin signatures).
+    ///
+    /// # Arguments
+    /// * `admin1` - First admin address (must provide auth)
+    /// * `admin2` - Second admin address (must provide auth)
+    /// * `admin_to_remove` - The admin to remove
+    ///
+    /// # Returns
+    /// Ok(()) if successful, Error if validation fails
+    pub fn remove_admin(env: Env, admin1: Address, admin2: Address, admin_to_remove: Address) -> Result<(), Error> {
+        // Require both existing admins to provide cryptographic signatures
+        admin1.require_auth();
+        admin2.require_auth();
+
+        // Verify both are distinct addresses
+        if admin1 == admin2 {
+            return Err(Error::MultiSigValidationFailed);
+        }
+
+        // Verify both are authorized admins
+        crate::auth::_require_authorized(&env, &admin1);
+        crate::auth::_require_authorized(&env, &admin2);
+
+        // Get current admin list
+        let admins = crate::auth::_get_admin(&env);
+        let admin_count = admins.len();
+
+        // Cannot remove if would leave less than 1 admin
+        if admin_count <= 1 {
+            return Err(Error::CannotRemoveLastAdmin);
+        }
+
+        // Verify the admin to remove actually exists
+        if !admins.iter().any(|a| a == admin_to_remove) {
+            return Err(Error::NotAuthorized);
+        }
+
+        // Remove the admin
+        crate::auth::_remove_authorized(&env, &admin_to_remove);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "admin_removed"),),
+            (admin1.clone(), admin2.clone(), admin_to_remove.clone()),
+        );
+
+        Ok(())
+    }
+
+    /// Get the total number of registered admins.
+    pub fn get_admin_count(env: Env) -> u32 {
+        if !crate::auth::_has_admin(&env) {
+            return 0;
+        }
+        crate::auth::_get_admin(&env).len()
     }
 }
 

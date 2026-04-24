@@ -1576,3 +1576,348 @@ fn test_renounce_ownership_blocks_admin_functions_after_renouncement() {
     let dummy_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
     client.upgrade(&admin, &dummy_hash);
 }
+
+// ============================================================================
+// Multi-Signature Pause Tests
+// ============================================================================
+
+#[test]
+fn test_toggle_pause_requires_two_admins() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    // Initialize with first admin
+    client.init_admin(&admin1);
+
+    // Add second admin
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+    });
+
+    // Verify initially not paused
+    env.as_contract(&contract_id, || {
+        assert!(!crate::auth::_is_paused(&env));
+    });
+
+    // Toggle pause with two admins
+    let result = client.toggle_pause(&admin1, &admin2);
+    assert_eq!(result, Ok(true));
+
+    // Verify paused state
+    env.as_contract(&contract_id, || {
+        assert!(crate::auth::_is_paused(&env));
+    });
+
+    // Toggle again to unpause
+    let result = client.toggle_pause(&admin1, &admin2);
+    assert_eq!(result, Ok(false));
+
+    // Verify unpaused state
+    env.as_contract(&contract_id, || {
+        assert!(!crate::auth::_is_paused(&env));
+    });
+}
+
+#[test]
+fn test_toggle_pause_fails_with_same_admin_twice() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin1);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+    });
+
+    // Should fail when using the same admin twice
+    let result = client.try_toggle_pause(&admin1, &admin1);
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::MultiSigValidationFailed),
+        other => panic!("expected MultiSigValidationFailed, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_toggle_pause_fails_with_non_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let non_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin1);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+    });
+
+    // Should fail when one signer is not an admin
+    let result = client.try_toggle_pause(&admin1, &non_admin);
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::NotAuthorized),
+        other => panic!("expected NotAuthorized, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_toggle_pause_fails_with_only_one_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    // Initialize with only one admin
+    client.init_admin(&admin1);
+
+    // Should fail when only one admin exists
+    let fake_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let result = client.try_toggle_pause(&admin1, &fake_admin);
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::NotAuthorized),
+        other => panic!("expected NotAuthorized, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_register_admin_with_two_signatures() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin3 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    // Initialize with two admins
+    client.init_admin(&admin1);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+    });
+
+    assert_eq!(client.get_admin_count(), 2);
+
+    // Register third admin with signatures from admin1 and admin2
+    client.register_admin(&admin1, &admin2, &admin3);
+
+    assert_eq!(client.get_admin_count(), 3);
+    assert!(client.is_admin(&admin3));
+}
+
+#[test]
+fn test_register_admin_fails_at_max_capacity() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin3 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin4 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    // Initialize with three admins
+    client.init_admin(&admin1);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+        crate::auth::_add_authorized(&env, &admin3);
+    });
+
+    assert_eq!(client.get_admin_count(), 3);
+
+    // Should fail when trying to add a 4th admin
+    let result = client.try_register_admin(&admin1, &admin2, &admin4);
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::MaxAdminsReached),
+        other => panic!("expected MaxAdminsReached, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_remove_admin_with_two_signatures() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin3 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    // Initialize with three admins
+    client.init_admin(&admin1);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+        crate::auth::_add_authorized(&env, &admin3);
+    });
+
+    assert_eq!(client.get_admin_count(), 3);
+
+    // Remove admin3 with signatures from admin1 and admin2
+    client.remove_admin(&admin1, &admin2, &admin3);
+
+    assert_eq!(client.get_admin_count(), 2);
+    assert!(!client.is_admin(&admin3));
+    assert!(client.is_admin(&admin1));
+    assert!(client.is_admin(&admin2));
+}
+
+#[test]
+fn test_remove_admin_fails_if_last_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    // Initialize with only one admin
+    client.init_admin(&admin1);
+
+    // Should fail when trying to remove the last admin
+    let fake_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let result = client.try_remove_admin(&admin1, &fake_admin, &admin1);
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::NotAuthorized),
+        other => panic!("expected NotAuthorized, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_multi_sig_pause_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin1);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+    });
+
+    client.toggle_pause(&admin1, &admin2);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("pause_toggled"));
+}
+
+#[test]
+fn test_register_admin_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin3 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin1);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+    });
+
+    client.register_admin(&admin1, &admin2, &admin3);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("admin_registered"));
+}
+
+#[test]
+fn test_remove_admin_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin3 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin1);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+        crate::auth::_add_authorized(&env, &admin3);
+    });
+
+    client.remove_admin(&admin1, &admin2, &admin3);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("admin_removed"));
+}
+
+#[test]
+fn test_get_admin_count_returns_correct_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    // Initially 1 admin
+    client.init_admin(&admin1);
+    assert_eq!(client.get_admin_count(), 1);
+
+    // Add second admin
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+    });
+    assert_eq!(client.get_admin_count(), 2);
+}
+
+#[test]
+fn test_full_multi_sig_workflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    
+    // Start with 2 admins
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin3 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin1);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+    });
+
+    // Step 1: Register third admin
+    client.register_admin(&admin1, &admin2, &admin3);
+    assert_eq!(client.get_admin_count(), 3);
+
+    // Step 2: Toggle pause with admin1 and admin3
+    let paused = client.toggle_pause(&admin1, &admin3);
+    assert_eq!(paused, Ok(true));
+
+    // Step 3: Remove admin2 with admin1 and admin3
+    client.remove_admin(&admin1, &admin3, &admin2);
+    assert_eq!(client.get_admin_count(), 2);
+    assert!(!client.is_admin(&admin2));
+
+    // Step 4: Toggle unpause with remaining admins
+    let paused = client.toggle_pause(&admin1, &admin3);
+    assert_eq!(paused, Ok(false));
+}
