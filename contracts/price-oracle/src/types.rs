@@ -7,6 +7,8 @@ pub enum DataKey {
     BaseCurrencyPairs,
     PriceData,
     PriceBoundsData,
+    PriceFloorData,
+    AssetDescription(Symbol),
     PendingAdmin,
     PendingAdminTimestamp,
     AdminUpdateTimestamp,
