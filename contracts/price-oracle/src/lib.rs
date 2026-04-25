@@ -128,6 +128,11 @@ pub trait StellarFlowTrait {
 /// Any price update exceeding this threshold will be rejected to prevent flash crashes.
 const MAX_PERCENT_CHANGE_BPS: i128 = 1_000;
 
+/// Percentage move threshold (5% = 500 basis points) above which a "cross_call"
+/// volatility event is published so downstream contracts (e.g. liquidation bots)
+/// can react without polling.
+const VOLATILITY_THRESHOLD_BPS: i128 = 500;
+
 /// Error types for the price oracle contract
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]

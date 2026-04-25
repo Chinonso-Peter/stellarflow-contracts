@@ -592,6 +592,71 @@ fn test_update_price_emits_event() {
 }
 
 #[test]
+fn test_update_price_emits_cross_call_event_on_5pct_move() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let asset = symbol_short!("NGN");
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    client.add_asset(&admin, &asset);
+
+    // Set a baseline price via set_price (bypasses provider check)
+    // Use small values so the delta check (>50) doesn't fire on the update
+    let old_price: i128 = 40;
+    let new_price: i128 = 43; // 7.5% increase (750 bps > 500 threshold), delta=3 ≤ 50
+
+    client.set_price(&asset, &old_price, &6u32, &3600u64);
+
+    client.update_price(&provider, &asset, &new_price, &6u32, &100u32, &3600u64);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    // "cross_call" topic must be present
+    assert!(debug_str.contains("cross_call"), "expected cross_call event, got: {}", debug_str);
+}
+
+#[test]
+fn test_update_price_no_cross_call_event_below_5pct() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let asset = symbol_short!("NGN");
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    client.add_asset(&admin, &asset);
+
+    // 2% move — below 5% threshold, delta=1 ≤ 50
+    let old_price: i128 = 50;
+    let new_price: i128 = 51; // 2% increase
+
+    client.set_price(&asset, &old_price, &6u32, &3600u64);
+    client.update_price(&provider, &asset, &new_price, &6u32, &100u32, &3600u64);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(!debug_str.contains("cross_call"), "cross_call should NOT fire below 5%");
+}
+
+#[test]
 fn test_update_price_delta_limit_rejection_emits_anomaly_event() {
     let env = Env::default();
     env.mock_all_auths();
