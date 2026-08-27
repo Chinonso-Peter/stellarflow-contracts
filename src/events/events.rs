@@ -140,6 +140,9 @@ pub const EV_BALLOT_OPENED: Symbol = symbol_short!("ball_open");
 /// Governance: a revocation ballot was closed.
 pub const EV_BALLOT_CLOSED: Symbol = symbol_short!("ball_clos");
 
+/// Bridge: the validator set was rotated after multi-sig approval.
+pub const EV_BRIDGE_VALIDATORS_UPDATED: Symbol = symbol_short!("bval_upd");
+
 // ---------------------------------------------------------------------------
 // Core publishing function
 // ---------------------------------------------------------------------------
