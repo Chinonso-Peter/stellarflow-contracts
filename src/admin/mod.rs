@@ -191,7 +191,7 @@ pub fn propose_emergency_revocation(
 
     // Guard: only one active emergency proposal at a time.
     if has_temp_proposal(env, &EMERGENCY_REVOCATION_TEMP_KEY) {
-        return Err(ContractError::EmergencyRevocationAlreadyActive);
+        return Err(ContractError::EmergRevokeAlreadyActive);
     }
 
     // The target must currently be a signer or the admin.
@@ -510,7 +510,7 @@ pub fn execute_admin_change_by_timelock(
 
     let elapsed = env.ledger().timestamp().saturating_sub(proposal.proposed_at);
     if elapsed < ADMIN_CHANGE_TIMELOCK_SECONDS {
-        return Err(ContractError::AdminChangeTimelockNotSatisfied);
+        return Err(ContractError::AdminTimelockNotSatisfied);
     }
 
     let data: ContractData = env

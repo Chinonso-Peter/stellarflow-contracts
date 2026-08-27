@@ -4,7 +4,7 @@
 //! `INTERIOR_SCALE` (10^14) before division, then normalize back to the
 //! standard 10^7 fixed-point footprint prior to ledger mutations.
 
-use crate::{AssetId, ContractError, TimeLockedUpgradeContract};
+use crate::{AssetId, ContractData, ContractError, TimeLockedUpgradeContract, DATA_KEY};
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 pub const STANDARD_FIXED_POINT_SCALE: i128 = 10_000_000;
@@ -218,7 +218,11 @@ pub fn add_corridor_fees(
     admin.require_auth();
     // Reject dust deposits that fall below the minimum transfer threshold.
     crate::validation::dust::check_min_transfer(collected)?;
-    let data = TimeLockedUpgradeContract::get_data(env.clone())?;
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
     if data.admin != admin {
         return Err(ContractError::NotAdmin);
     }
@@ -352,8 +356,7 @@ pub fn set_dynamic_fee_config(
     max_fee_bps: u32,
     period_seconds: u64,
 ) -> Result<(), ContractError> {
-    use crate::auth::_require_authorized;
-    _require_authorized(env, caller);
+    caller.require_auth();
     
     // Validate bounds
     if min_fee_bps < 5 || max_fee_bps > 30 || min_fee_bps >= max_fee_bps {
@@ -393,7 +396,11 @@ pub fn set_corridor_weight(
     dynamic_weight: u64,
 ) -> Result<CorridorWeightProfile, ContractError> {
     admin.require_auth();
-    let data = TimeLockedUpgradeContract::get_data(env.clone())?;
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
     if data.admin != admin {
         return Err(ContractError::NotAdmin);
     }
