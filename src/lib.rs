@@ -225,6 +225,8 @@ pub enum ContractError {
     BridgeEscrowNotConfigured = 57,
     /// Reentrancy guard detected a reentrant call during execution.
     ReentrancyDetected = 58,
+    /// Merkle proof verification failed or root is unverified/expired.
+    InvalidMerkleProof = 59,
 }
 
 // Contract state keys
@@ -1436,6 +1438,71 @@ impl TimeLockedUpgradeContract {
 
     pub fn bridge_escrow_config(env: Env) -> Option<bridge::escrow::BridgeEscrowConfig> {
         bridge::escrow::get_config(&env)
+    }
+
+    // ── Zero-Knowledge Anonymity Set Deposit Merkle Verifier (Issue #767) ────
+
+    /// Deposit a commitment leaf into the anonymity set Merkle tree.
+    /// Returns the assigned leaf index and the updated historical root.
+    pub fn deposit_commitment(
+        env: Env,
+        commitment: BytesN<32>,
+    ) -> Result<(u32, BytesN<32>), ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        Self::assert_contract_is_active(&env)?;
+        zk::merkle::insert_deposit(&env, commitment)
+    }
+
+    /// Verify a user withdrawal proof against the anonymity set Merkle roots and spend the nullifier.
+    /// Reverts with `ContractError::InvalidMerkleProof` if root is unverified or expired.
+    /// Reverts with `ContractError::NullifierAlreadyUsed` if nullifier was already spent.
+    pub fn verify_zk_withdrawal(
+        env: Env,
+        root: BytesN<32>,
+        nullifier: BytesN<32>,
+        leaf: BytesN<32>,
+        path: Vec<BytesN<32>>,
+        leaf_index: u32,
+    ) -> Result<bool, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        Self::assert_contract_is_active(&env)?;
+        zk::merkle::verify_withdrawal_and_spend(&env, &root, &nullifier, &leaf, &path, leaf_index)?;
+        Ok(true)
+    }
+
+    /// Check if a Merkle root exists in the historical root buffer and is currently unexpired.
+    pub fn is_merkle_root_valid(env: Env, root: BytesN<32>) -> bool {
+        zk::merkle::is_root_valid(&env, &root)
+    }
+
+    /// Get the current active Merkle root of the anonymity set.
+    pub fn get_anonymity_set_root(env: Env) -> Option<BytesN<32>> {
+        zk::merkle::get_current_root(&env)
+    }
+
+    /// Check if a nullifier has already been spent on-chain.
+    pub fn is_nullifier_spent(env: Env, nullifier: BytesN<32>) -> bool {
+        zk::nullifier::is_nullifier_used(&env, &nullifier)
+    }
+
+    /// Set the validity window for historical Merkle roots in seconds (admin only).
+    pub fn set_merkle_root_validity_window(
+        env: Env,
+        admin: Address,
+        validity_seconds: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let data = Self::get_data(env.clone())?;
+        if data.admin != admin {
+            return Err(ContractError::NotAdmin);
+        }
+        zk::merkle::set_root_validity_window(&env, validity_seconds);
+        Ok(())
+    }
+
+    /// Get the validity window for historical Merkle roots in seconds.
+    pub fn get_merkle_root_validity_window(env: Env) -> u64 {
+        zk::merkle::get_root_validity_window(&env)
     }
 
     // --- Private Helpers ---
