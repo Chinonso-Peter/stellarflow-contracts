@@ -70,6 +70,7 @@ pub fn asset_id_to_symbol(asset_id: u32) -> Symbol {
 pub(crate) mod nonce;
 use crate::nonce::{consume_nonce, get_nonce};
 
+pub mod action_guard;
 pub mod amm;
 pub mod admin;
 pub mod auth;
@@ -225,6 +226,11 @@ pub enum ContractError {
     BridgeEscrowNotConfigured = 57,
     /// Reentrancy guard detected a reentrant call during execution.
     ReentrancyDetected = 58,
+    /// A queued governance action was executed before its timelock delay elapsed.
+    TimelockNotExpired = 59,
+    /// The transaction hash provided for a queued governance action does not match
+    /// the hash of the original queued proposal payload.
+    PayloadHashMismatch = 60,
 }
 
 // Contract state keys
