@@ -100,6 +100,7 @@ pub mod temp_governance;
 pub mod security;
 pub mod upgrades;
 pub mod validation;
+pub mod voting_delegation;
 use crate::governance::{
     verify_staged_delay, StagedUpgrade, VotingBallot, open_ballot, cast_vote, close_ballot,
     verify_upgrade_quorum, GovernanceUpgradeProposal, GovernanceUpgradeProposedEvent,
@@ -225,6 +226,12 @@ pub enum ContractError {
     BridgeEscrowNotConfigured = 57,
     /// Reentrancy guard detected a reentrant call during execution.
     ReentrancyDetected = 58,
+    /// The staker has no active delegation to revoke.
+    NoActiveDelegation = 59,
+    /// A staker attempted to delegate voting power to themselves or an invalid target.
+    InvalidDelegate = 60,
+    /// The staker has no direct voting weight available to delegate.
+    NoVotingWeight = 61,
 }
 
 // Contract state keys
@@ -389,6 +396,53 @@ impl TimeLockedUpgradeContract {
         env.storage().instance().remove(&stake_key);
         env.storage().instance().set(&TOTAL_STAKED_KEY, &new_total);
         Ok(amount)
+    }
+
+    /// Credit direct voting weight into a staker's balance map.
+    ///
+    /// This seeds the source balance a staker later moves when delegating
+    /// voting power to a delegate.
+    pub fn set_voting_weight(env: Env, staker: Address, amount: u128) -> Result<(), ContractError> {
+        staker.require_auth();
+        crate::voting_delegation::set_voting_weight(&env, &staker, amount);
+        Ok(())
+    }
+
+    /// Delegate the caller's entire direct voting weight to `delegate`.
+    ///
+    /// The caller's balance map is cleared and the weight is aggregated into
+    /// the delegate's total delegated power metric.
+    pub fn delegate(env: Env, staker: Address, delegate: Address) -> Result<(), ContractError> {
+        staker.require_auth();
+        admin::assert_not_revoked(&env, &staker)?;
+        crate::voting_delegation::delegate(&env, &staker, &delegate)
+    }
+
+    /// Instantly revoke delegated voting power and reclaim direct voting rights.
+    ///
+    /// Clears the staker's delegate association, recomputes the former
+    /// delegate's total delegated power, and restores the voting weight
+    /// directly into the staker's balance map.
+    pub fn undelegate(env: Env, staker: Address) -> Result<(), ContractError> {
+        staker.require_auth();
+        admin::assert_not_revoked(&env, &staker)?;
+        crate::voting_delegation::undelegate(&env, &staker)?;
+        Ok(())
+    }
+
+    /// Read the direct voting weight held in a staker's balance map.
+    pub fn get_voting_weight(env: Env, staker: Address) -> u128 {
+        crate::voting_delegation::get_voting_weight(&env, &staker)
+    }
+
+    /// Read the active delegation for a staker, if any.
+    pub fn get_delegation(env: Env, staker: Address) -> Option<crate::voting_delegation::Delegation> {
+        crate::voting_delegation::get_delegation(&env, &staker)
+    }
+
+    /// Read the total voting power delegated to a delegate.
+    pub fn get_delegated_total(env: Env, delegate: Address) -> u128 {
+        crate::voting_delegation::get_delegated_total(&env, &delegate)
     }
 
     pub fn remove_signer(env: Env, signer: Address, caller: Address) -> Result<(), ContractError> {
