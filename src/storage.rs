@@ -99,6 +99,16 @@ pub enum CorridorFeeKey {
     FeeByAsset(Symbol),
 }
 
+/// Tuple-based bridge validator storage key: (current set / rotation sequence).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BridgeValidatorKey {
+    /// Current trusted validator public keys.
+    BridgeValidators,
+    /// Rotation sequence number, incremented on each validator set update.
+    BridgeRotationSeq,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeedStakeValue {
@@ -232,4 +242,61 @@ pub fn update_feed_stake_activity(env: &Env, node: Address, asset: u32) {
             .persistent()
             .extend_ttl(&key, RENT_THRESHOLD, RENT_EXTEND_TO);
     }
+}
+
+/// Retrieve the current trusted bridge validator public keys.
+pub fn get_bridge_validators(env: &Env) -> Vec<Address> {
+    let key = BridgeValidatorKey::BridgeValidators;
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_THRESHOLD);
+    }
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_default()
+}
+
+/// Retrieve the current bridge validator rotation sequence number.
+pub fn get_bridge_rotation_seq(env: &Env) -> u64 {
+    let key = BridgeValidatorKey::BridgeRotationSeq;
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_THRESHOLD);
+    }
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(0u64)
+}
+
+/// Emit a `BridgeValidatorsUpdated` event with the new validator key hashes.
+pub fn emit_bridge_validators_updated(env: &Env, validators: Vec<Address>, seq: u64) {
+    env.events().publish(
+        (Symbol::new(env, "BridgeValidatorsUpdated"), seq),
+        validators,
+    );
+}
+
+/// Update the trusted bridge validator set. Must be called only after
+/// governance multi-sig approval. Increments the rotation sequence number
+/// and emits a `BridgeValidatorsUpdated` event.
+pub fn set_bridge_validators(env: &Env, validators: Vec<Address>) -> u64 {
+    let new_seq = get_bridge_rotation_seq(env) + 1;
+    env.storage()
+        .persistent()
+        .set(&BridgeValidatorKey::BridgeValidators, &validators);
+    env.storage()
+        .persistent()
+        .set(&BridgeValidatorKey::BridgeRotationSeq, &new_seq);
+    env.storage()
+        .persistent()
+        .extend_ttl(&BridgeValidatorKey::BridgeValidators, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_THRESHOLD);
+    env.storage()
+        .persistent()
+        .extend_ttl(&BridgeValidatorKey::BridgeRotationSeq, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_THRESHOLD);
+    emit_bridge_validators_updated(env, validators, new_seq);
+    new_seq
 }
