@@ -10,6 +10,10 @@ pub(crate) const SIGNER_WEIGHTS_KEY: Symbol = symbol_short!("SIGWT");
 pub(crate) const QUORUM_WEIGHT_THRESHOLD_KEY: Symbol = symbol_short!("QWTH");
 pub(crate) const PROPOSAL_WEIGHT_KEY: Symbol = symbol_short!("PROPWT");
 
+pub(crate) const VALIDATORS_KEY: Symbol = symbol_short!("VALIDS");
+pub(crate) const VALIDATOR_SEQUENCE_KEY: Symbol = symbol_short!("VALSEQ");
+pub(crate) const BRIDGE_VALIDATORS_UPDATED_EVENT: Symbol = symbol_short!("BridgeValidatorsUpdated");
+
 #[contracttype]
 #[derive(Clone)]
 pub struct GovernanceConfig {
@@ -207,6 +211,46 @@ pub fn calculate_collected_weight(env: &Env, signers: &Vec<Address>, data: &Cont
     
     Ok(collected_weight)
 }
+pub fn get_validator_set(env: &Env) -> Map<BytesN<32>, ()> {
+    env.storage()
+        .instance()
+        .get(&VALIDATORS_KEY)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+pub fn get_validator_sequence(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&VALIDATOR_SEQUENCE_KEY)
+        .unwrap_or(0u64)
+}
+
+pub fn rotate_validators(
+    env: &Env,
+    signers: &Vec<Address>,
+    new_validators: Vec<BytesN<32>>,
+) -> Result<u64, ContractError> {
+    verify_upgrade_quorum(env, signers)?;
+
+    let mut validator_set: Map<BytesN<32>, ()> = Map::new(env);
+    for validator in new_validators.iter() {
+        validator_set.set(validator.clone(), ());
+    }
+
+    let sequence = get_validator_sequence(env)
+        .checked_add(1)
+        .ok_or(ContractError::Overflow)?;
+
+    env.storage().instance().set(&VALIDATORS_KEY, &validator_set);
+    env.storage().instance().set(&VALIDATOR_SEQUENCE_KEY, &sequence);
+    env.events().publish(
+        (BRIDGE_VALIDATORS_UPDATED_EVENT, sequence),
+        new_validators,
+    );
+
+    Ok(sequence)
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct GovernanceUpgradeProposedEvent {
