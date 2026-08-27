@@ -326,6 +326,19 @@ pub struct TimeLockedUpgradeContract;
 
 #[contractimpl]
 impl TimeLockedUpgradeContract {
+    /// Atomically consume a nullifier for a private transfer.
+    ///
+    /// The persistent key is checked and written in this invocation, so a
+    /// replay returns before any caller-supplied transfer side effect runs.
+    pub fn consume_private_transfer_nullifier(
+        env: Env,
+        caller: Address,
+        nullifier: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        crate::zk::nullifier::register_nullifier(&env, nullifier)
+    }
+
     pub fn initialize(env: Env, admin: Address, treasury: Address) -> Result<(), ContractError> {
         ensure_schema_version(&env)?;
         if env.storage().instance().has(&DATA_KEY) {
