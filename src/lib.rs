@@ -225,6 +225,15 @@ pub enum ContractError {
     BridgeEscrowNotConfigured = 57,
     /// Reentrancy guard detected a reentrant call during execution.
     ReentrancyDetected = 58,
+    OrderNotFound = 59,
+    OrderZeroAmount = 60,
+    OrderInvalidPrice = 61,
+    OrderAlreadyClosed = 62,
+    OrderInsufficientRemaining = 63,
+    OrderNotMaker = 64,
+    OrderSideMismatch = 65,
+    OrderPairMismatch = 66,
+    OrderPriceNotCrossed = 67,
 }
 
 // Contract state keys
@@ -244,7 +253,7 @@ const PLATFORM_CAPITAL_KEY: Symbol = symbol_short!("CAPITAL");
 pub(crate) const CONSENSUS_CACHE_KEY: Symbol = symbol_short!("CACHE");
 const RELAYER_TTL_THRESHOLD: u32 = 5_000;
 const INSTANCE_TTL_EXTEND: u32 = 100_000;
-const TREASURY_KEY: Symbol = symbol_short!("TREASURY");
+pub(crate) const TREASURY_KEY: Symbol = symbol_short!("TREASURY");
 const SEQUENCE_COUNTER_KEY: Symbol = symbol_short!("SEQCTR");
 const REVOCATION_KEY: Symbol = symbol_short!("REVOKE");
 const RECOVERY_KEY: Symbol = symbol_short!("RKEY");
@@ -1332,11 +1341,25 @@ impl TimeLockedUpgradeContract {
         orders::limit::place_order(&env, maker, pair, price_tick, sell_amount)
     }
 
+    pub fn place_buy_limit_order(
+        env: Env, maker: Address, pair: orders::limit::AssetPair, price_tick: i128, buy_amount: i128,
+    ) -> Result<orders::limit::LimitOrder, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::place_buy_order(&env, maker, pair, price_tick, buy_amount)
+    }
+
     pub fn fill_limit_order(
         env: Env, filler: Address, order_id: u64, fill_amount: i128,
     ) -> Result<orders::limit::FillResult, ContractError> {
         let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
         orders::limit::fill_order(&env, filler, order_id, fill_amount)
+    }
+
+    pub fn match_limit_orders(
+        env: Env, seller_order_id: u64, buyer_order_id: u64, fill_amount: i128,
+    ) -> Result<orders::limit::SettlementResult, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::match_orders(&env, seller_order_id, buyer_order_id, fill_amount)
     }
 
     /// Cancel a still-open order and return its unfilled balance to the maker.
@@ -1351,6 +1374,17 @@ impl TimeLockedUpgradeContract {
 
     pub fn get_orders_at_tick(env: Env, pair: orders::limit::AssetPair, price_tick: i128) -> Vec<u64> {
         orders::limit::get_orders_at_tick(&env, pair, price_tick)
+    }
+
+    pub fn get_order_balance(env: Env, owner: Address, asset: Address) -> i128 {
+        orders::limit::get_balance(&env, owner, asset)
+    }
+
+    pub fn withdraw_order_balance(
+        env: Env, owner: Address, asset: Address, amount: i128,
+    ) -> Result<i128, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::withdraw_balance(&env, owner, asset, amount)
     }
 
     // ── Multi-hop Route Swaps ───────────────────────────────────────────────
