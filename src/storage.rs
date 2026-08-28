@@ -232,3 +232,46 @@ pub fn update_feed_stake_activity(env: &Env, node: Address, asset: u32) {
             .extend_ttl(&key, RENT_THRESHOLD, RENT_EXTEND_TO);
     }
 }
+
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OptimizedDataKey {
+    Account(soroban_sdk::BytesN<32>),
+    EventTopic(soroban_sdk::BytesN<32>),
+}
+
+pub struct KeyOptimizer;
+
+impl KeyOptimizer {
+    pub fn address_to_bytes32(addr: &soroban_sdk::Address) -> soroban_sdk::BytesN<32> {
+        let env = addr.env();
+        let bytes = addr.to_xdr(env);
+        env.crypto().sha256(&bytes)
+    }
+
+    pub fn string_to_bytes32(env: &soroban_sdk::Env, s: &soroban_sdk::String) -> soroban_sdk::BytesN<32> {
+        let bytes = s.to_xdr(env);
+        env.crypto().sha256(&bytes)
+    }
+
+    pub fn save_optimized_account(env: &soroban_sdk::Env, addr: &soroban_sdk::Address, value: &soroban_sdk::Val) {
+        let hashed_key = Self::address_to_bytes32(addr);
+        let key = OptimizedDataKey::Account(hashed_key);
+        env.storage().persistent().set(&key, value);
+        extend_persistent_ttl(env, &key);
+    }
+
+    pub fn get_optimized_account<V: soroban_sdk::IntoVal<soroban_sdk::Env, soroban_sdk::Val> + soroban_sdk::TryFromVal<soroban_sdk::Env, soroban_sdk::Val>>(
+        env: &soroban_sdk::Env,
+        addr: &soroban_sdk::Address,
+    ) -> Option<V> {
+        let hashed_key = Self::address_to_bytes32(addr);
+        let key = OptimizedDataKey::Account(hashed_key);
+        if env.storage().persistent().has(&key) {
+            extend_persistent_ttl(env, &key);
+            env.storage().persistent().get(&key)
+        } else {
+            None
+        }
+    }
+}

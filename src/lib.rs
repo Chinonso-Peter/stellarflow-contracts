@@ -218,6 +218,7 @@ impl ContractError {
     pub const OrderNotMaker: Self = Self::Unauthorized;
     pub const RoleExpirationInPast: Self = Self::UpgradeTimelockNotSatisfied;
     pub const RoleNotFound: Self = Self::NotRegistered;
+    pub const UnauthorizedReentryAttempt: Self = Self::Unauthorized;
     pub const RoleExpiredOrMissing: Self = Self::Unauthorized;
 }
 
@@ -1389,6 +1390,48 @@ impl TimeLockedUpgradeContract {
 
     pub fn bridge_escrow_config(env: Env) -> Option<bridge::escrow::BridgeEscrowConfig> {
         bridge::escrow::get_config(&env)
+    }
+
+    pub fn calculate_utilization(env: Env, cash: i128, borrows: i128) -> u32 {
+        vaults::interest::InterestRateController::calculate_utilization(cash, borrows)
+    }
+
+    pub fn calculate_interest_rate(env: Env, utilization: u32, config: vaults::interest::InterestRateConfig) -> u32 {
+        vaults::interest::InterestRateController::calculate_interest_rate(utilization, &config)
+    }
+
+    pub fn accrue_interest(
+        env: Env,
+        mut pool: vaults::interest::PoolState,
+        config: vaults::interest::InterestRateConfig,
+    ) -> (vaults::interest::PoolState, i128) {
+        let accrued = vaults::interest::InterestRateController::accrue_interest(&env, &mut pool, &config);
+        (pool, accrued)
+    }
+
+    pub fn optimize_address(env: Env, addr: Address) -> BytesN<32> {
+        storage::KeyOptimizer::address_to_bytes32(&addr)
+    }
+
+    pub fn optimize_string(env: Env, s: String) -> BytesN<32> {
+        storage::KeyOptimizer::string_to_bytes32(&env, &s)
+    }
+
+    pub fn get_liquidity_depth(env: Env, pair: orders::limit::AssetPair, is_bid: bool) -> Vec<orders::limit::LiquidityLevel> {
+        orders::limit::get_liquidity_depth(&env, pair, is_bid)
+    }
+
+    pub fn enforce_auth_isolation(env: Env, expected_caller: Address) -> Result<(), ContractError> {
+        security::auth_guard::AuthContextGuard::enforce_isolation(&env, &expected_caller)
+    }
+
+    pub fn execute_isolated_call(
+        env: Env,
+        target_contract: Address,
+        function_name: Symbol,
+        args: Vec<Val>,
+    ) -> Result<Val, ContractError> {
+        security::auth_guard::AuthContextGuard::execute_isolated_call(&env, &target_contract, &function_name, args)
     }
 
     // --- Private Helpers ---
