@@ -1,8 +1,16 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short,
+    contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short,
     Address, Bytes, BytesN, Env, Map, Symbol, Vec,
 };
+
+contractmeta!(key = "name", val = "stellarflow-contracts");
+contractmeta!(key = "version", val = "0.1.0");
+contractmeta!(key = "author", val = "StellarFlow Network");
+contractmeta!(key = "description", val = "StellarFlow Contracts");
+contractmeta!(key = "interface", val = "stellarflow-v1");
+contractmeta!(key = "build_time", val = "2026-08-28");
+contractmeta!(key = "git_sha", val = "dev");
 
 /// Numeric asset identifier for gas-optimized storage.
 pub type AssetId = u32;
@@ -65,8 +73,8 @@ pub mod auth;
 pub mod bridge;
 pub mod config;
 pub mod consensus;
-#[path = "core/instance.rs"]
-pub mod instance;
+pub mod kernel;
+pub use kernel::instance;
 pub mod errors;
 pub mod escrow;
 pub mod events;
@@ -464,9 +472,21 @@ pub enum StakingStorageKey {
 #[contract]
 pub struct TimeLockedUpgradeContract;
 
+impl TimeLockedUpgradeContract {
+    pub(crate) fn load_data(env: &Env) -> Result<ContractData, crate::ContractError> {
+        let _ = ensure_schema_version(env);
+        env.storage().instance().get(&DATA_KEY).ok_or(crate::ContractError::NotInitialized)
+    }
+
+    pub(crate) fn _load_data(env: &Env) -> Result<ContractData, crate::ContractError> {
+        Self::load_data(env)
+    }
+}
+
 #[contractimpl]
 impl TimeLockedUpgradeContract {
     pub fn initialize(env: Env, admin: Address, treasury: Address) -> Result<(), ContractError> {
+        let _dummy: soroban_sdk::Error = soroban_sdk::Error::from_contract_error(1);
         ensure_schema_version(&env)?;
         if env.storage().instance().has(&DATA_KEY) {
             return Err(ContractError::AlreadyInitialized);
@@ -582,13 +602,8 @@ impl TimeLockedUpgradeContract {
         governance::get_ballot(&env, REVOCATION_KEY)
     }
 
-    fn _load_data(env: &Env) -> Result<ContractData, ContractError> {
-        let _ = ensure_schema_version(env);
-        env.storage().instance().get(&DATA_KEY).ok_or(ContractError::NotInitialized)
-    }
-
     pub fn get_data(env: Env) -> Result<ContractData, ContractError> {
-        Self::_load_data(&env)
+        Self::load_data(&env)
     }
 
     pub fn propose_upgrade(
@@ -856,7 +871,6 @@ impl TimeLockedUpgradeContract {
         crate::recovery::update_admin_activity(&env);
         Ok(pool)
     }
-
     pub fn get_corridor_fee_pool(env: Env, asset: AssetId) -> fees::CorridorFeePool {
         crate::fees::get_corridor_fee_pool(env, asset)
     }
@@ -1658,7 +1672,6 @@ impl TimeLockedUpgradeContract {
         admin::prune::prune_expired_keys(&env, &admin, &targets)
     }
 }
-
 #[cfg(test)]
 mod query_guardrail_tests {
     use super::*;

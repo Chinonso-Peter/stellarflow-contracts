@@ -357,6 +357,14 @@ pub fn set_dynamic_fee_config(
     period_seconds: u64,
 ) -> Result<(), ContractError> {
     caller.require_auth();
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
+    if data.admin != *caller {
+        return Err(ContractError::NotAdmin);
+    }
     
     // Validate bounds
     if min_fee_bps < 5 || max_fee_bps > 30 || min_fee_bps >= max_fee_bps {

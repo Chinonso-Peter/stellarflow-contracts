@@ -193,8 +193,8 @@ pub fn propose_emergency_revocation(
     consume_admin_nonce(env, &proposer, AdminAction::ProposeEmergencyRevocation, nonce)?;
 
     // Guard: only one active emergency proposal at a time.
-    if env.storage().instance().has(&crate::temp_governance::EMERGENCY_REVOCATION_TEMP_KEY) {
-        return Err(ContractError::EmergencyRevocationActive);
+    if has_temp_proposal(env, &EMERGENCY_REVOCATION_TEMP_KEY) {
+        return Err(ContractError::EmergencyRevocationAlreadyActive);
     }
 
     // The target must currently be a signer or the admin.
