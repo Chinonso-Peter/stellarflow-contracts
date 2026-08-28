@@ -27,10 +27,37 @@ pub enum DataKey {
     ProposedAction(u64),
     /// Stores the list of voters for a proposed multi-sig action.
     ActionVotes(u64),
+    /// Stores affirmative and negative voter addresses separately.
+    ActionAffirmativeVotes(u64),
+    ActionNegativeVotes(u64),
+    /// Stores weighted totals for each side of a proposal.
+    ActionAffirmativeWeight(u64),
+    ActionNegativeWeight(u64),
+    /// Stores the snapshot weight recorded for a voter on a proposal.
+    ActionVoteWeight(u64, Address),
+    /// veFLOW lock contract used to read proposal-time voting power.
+    VeflowLockContract,
+    /// Circulating veFLOW supply used for quorum calculations.
+    VeflowCirculatingSupply,
     /// Maps an admin address to their ephemeral submission delegate.
     SubmissionDelegate(Address),
     /// Maps a delegate address back to the admin who authorized it.
     DelegateOf(Address),
+
+    // ── Circuit-Breaker ───────────────────────────────────────────────────────
+    /// Registered coordinator nodes that may trigger the circuit-breaker.
+    /// Value: Vec<Address>.
+    CircuitBreakerCoordinators,
+    /// Global circuit-breaker flag.  When true, every price query for a
+    /// high-volatility asset is dropped immediately.
+    CircuitBreakerActive,
+    /// Ledger timestamp at which the circuit-breaker was last tripped.
+    CircuitBreakerTrippedAt,
+    /// Address of the coordinator that last tripped the circuit-breaker.
+    CircuitBreakerTrippedBy,
+    /// Per-asset circuit-breaker override flag (Symbol → bool).
+    /// When true the asset is individually paused regardless of the global flag.
+    CircuitBreakerPairedAsset(soroban_sdk::Symbol),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,16 +80,47 @@ pub fn _has_admin(env: &Env) -> bool {
 }
 
 /// Check if a caller is in the authorized admin list.
+///
+/// Loads the admin list onto a fixed-size stack slice and scans linearly —
+/// no heap-allocated map is created inside the auth loop, reducing gas on
+/// routine multi-signature verification paths (closes #528).
 pub fn _is_authorized(env: &Env, caller: &Address) -> bool {
     if _is_revoked(env, caller) {
         return false;
     }
 
-    env.storage()
+    let admins = env
+        .storage()
         .instance()
         .get::<DataKey, Vec<Address>>(&DataKey::Admin)
-        .map(|admins| admins.iter().any(|admin| admin == *caller))
-        .unwrap_or(false)
+        .unwrap_or_else(|| Vec::new(env));
+
+    // Stack-local fixed buffer — avoids any BTreeMap / HashMap heap allocation.
+    const CAP: usize = 16;
+    let mut buf: [Option<Address>; CAP] = [
+        None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None,
+    ];
+    let len = (admins.len() as usize).min(CAP);
+    for i in 0..len {
+        buf[i] = Some(admins.get(i as u32).unwrap());
+    }
+
+    for i in 0..len {
+        if buf[i].as_ref() == Some(caller) {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn _require_auth_for_args<T: soroban_sdk::IntoVal>(
+    env: &Env,
+    caller: &Address,
+    args: &[T],
+) {
+    caller.require_auth_for_args(args);
+    let _ = env;
 }
 
 pub fn _require_authorized(env: &Env, caller: &Address) {
@@ -257,7 +315,6 @@ pub fn _is_provider(env: &Env, addr: &Address) -> bool {
         return false;
     }
 
-    env.storage()
     // 1. Direct provider whitelist check
     if env
         .storage()
