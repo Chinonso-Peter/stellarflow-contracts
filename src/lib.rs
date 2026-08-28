@@ -110,8 +110,12 @@ pub enum ContractError {
     DivisionByZero = 26,
     /// The proposed fee exceeds the maximum allowed ceiling.
     FeeCeilingExceeded = 27,
+    /// No flash-loan fee discount tier matches the supplied volume.
+    InvalidFlashLoanFeeTier = 28,
+    /// The flash-loan fee discount is outside the permitted range.
+    InvalidFlashLoanFeeDiscount = 29,
     /// Incoming tracking sequence is less than or equal to the active stored checkpoint value.
-    StaleSequence = 26,
+    StaleSequence = 30,
 }
 
 // Contract state keys
@@ -131,6 +135,7 @@ pub(crate) const REVOKED_SIGNER_KEY: Symbol = symbol_short!("REVOKED");
 const NODE_PROFILES_KEY: Symbol = symbol_short!("NODES");
 const PLATFORM_CAPITAL_KEY: Symbol = symbol_short!("CAPITAL");
 const CONSENSUS_CACHE_KEY: Symbol = symbol_short!("CACHE");
+const FLASH_LOAN_FEE_TIERS_KEY: Symbol = symbol_short!("FLTIER");
 const RELAYER_TTL_THRESHOLD: u32 = 5_000;
 
 #[contracttype]
@@ -173,6 +178,26 @@ pub struct CorridorFeePool {
     pub asset: Symbol,
     pub collected: u64,
     pub variable_pool: u64,
+}
+
+/// A volume-based flash-loan fee discount tier.
+///
+/// `min_volume` is inclusive and volumes are evaluated against tiers in
+/// descending order, so the highest eligible tier always wins.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlashLoanFeeTier {
+    pub min_volume: u64,
+    /// Discount in basis points (100 bps = 1%).
+    pub discount_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlashLoanFeeDiscount {
+    pub tier_index: u32,
+    pub discount_bps: u32,
+    pub fee: u64,
 }
 
 #[contracttype]
@@ -437,6 +462,74 @@ impl TimeLockedUpgradeContract {
         let profiles = Self::_get_node_profiles(&env);
         let profile = profiles.get(node).ok_or(ContractError::NotRegistered)?;
         Ok(Self::_scan_profile_for_rate(profile).ok_or(ContractError::NotRegistered)?)
+    }
+
+    /// Configure the ordered flash-loan fee discount tiers.
+    ///
+    /// Tiers must be strictly increasing by volume and may grant at most 100%
+    /// discount. The caller must be the contract administrator.
+    pub fn set_flash_loan_fee_tiers(
+        env: Env,
+        admin: Address,
+        tiers: Vec<FlashLoanFeeTier>,
+    ) -> Result<(), ContractError> {
+        let data = Self::get_data(env.clone())?;
+        if data.admin != admin {
+            return Err(ContractError::NotAdmin);
+        }
+        admin.require_auth();
+        let mut previous_volume = None;
+        for tier in tiers.iter() {
+            if tier.discount_bps > 10_000 {
+                return Err(ContractError::InvalidFlashLoanFeeDiscount);
+            }
+            if previous_volume
+                .map(|volume| tier.min_volume <= volume)
+                .unwrap_or(false)
+            {
+                return Err(ContractError::InvalidFlashLoanFeeTier);
+            }
+            previous_volume = Some(tier.min_volume);
+        }
+        env.storage().instance().set(&FLASH_LOAN_FEE_TIERS_KEY, &tiers);
+        Self::_extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Return the configured flash-loan fee discount tiers.
+    pub fn get_flash_loan_fee_tiers(env: Env) -> Vec<FlashLoanFeeTier> {
+        env.storage().instance().get(&FLASH_LOAN_FEE_TIERS_KEY).unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Calculate the effective flash-loan fee for a borrower volume.
+    ///
+    /// The highest tier whose minimum volume is met is selected. The result is
+    /// deterministic and does not mutate state, making it safe for pre-flight
+    /// fee quotes as well as settlement paths.
+    pub fn quote_flash_loan_fee(
+        env: Env,
+        base_fee: u64,
+        borrower_volume: u64,
+    ) -> Result<FlashLoanFeeDiscount, ContractError> {
+        let tiers = Self::get_flash_loan_fee_tiers(env.clone());
+        let mut selected: Option<(u32, u32)> = None;
+        for (index, tier) in tiers.iter().enumerate() {
+            if borrower_volume >= tier.min_volume {
+                selected = Some((index, tier.discount_bps));
+            }
+        }
+        let (tier_index, discount_bps) = selected.unwrap_or((u32::MAX, 0));
+        let discount = (base_fee as u128)
+            .checked_mul(discount_bps as u128)
+            .ok_or(ContractError::Overflow)?
+            / 10_000;
+        let fee = (base_fee as u128)
+            .checked_sub(discount)
+            .ok_or(ContractError::Overflow)?;
+        if fee > u64::MAX as u128 {
+            return Err(ContractError::Overflow);
+        }
+        Ok(FlashLoanFeeDiscount { tier_index, discount_bps, fee: fee as u64 })
     }
 
     pub fn add_corridor_fees(env: Env, asset: Symbol, collected: u64, variable_fee: u64) -> Result<CorridorFeePool, ContractError> {
