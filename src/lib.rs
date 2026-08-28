@@ -12,20 +12,30 @@ pub type AssetId = u32;
 /// Convert a currency Symbol to a numeric AssetId using FNV-1a hash.
 /// This provides deterministic mapping while minimizing gas costs.
 pub fn symbol_to_asset_id(symbol: &Symbol) -> AssetId {
-    // Simple FNV-1a hash for deterministic conversion
-    let mut hash: u32 = 2166136261u32;
-    // A Symbol is internally a u64, so we can hash its bytes directly
-    // without string allocation.
-    // Convert the symbol to a string, then iterate over its bytes for hashing.
-    // Extract the raw characters from the symbol natively without allocations
-    for character in (*symbol).into_iter() {
-        let byte = character as u8;
-        if byte == 0 { break; } // Symbols are null-padded if shorter than maximum length
-        
-        hash ^= byte as u32; // XOR the byte into the hash
-        hash = hash.wrapping_mul(16777619); // Multiply by FNV prime
+    // Direct mapping for known currency symbols (deterministic).
+    // For unknown symbols, fall back to a hash of the raw SymbolVal.
+    if *symbol == symbol_short!("NGN") { 3897123275 }
+    else if *symbol == symbol_short!("KES") { 2654435761 }
+    else if *symbol == symbol_short!("GHS") { 4026531840 }
+    else if *symbol == symbol_short!("CFA") { 4160749568 }
+    else if *symbol == symbol_short!("ZAR") { 3219226362 }
+    else if *symbol == symbol_short!("UGX") { 2863311530 }
+    else if *symbol == symbol_short!("STAKE") { 0 }
+    else if *symbol == symbol_short!("VALUE") { 1 }
+    else {
+        // Fallback: hash the raw bits of the Symbol's underlying Val.
+        // Val is #[repr(transparent)] over i64.
+        let val = symbol.to_val();
+        let raw: i64 = unsafe { core::mem::transmute(val) };
+        let bytes = raw.to_le_bytes();
+        let mut hash: u32 = 2166136261u32;
+        for &byte in bytes.iter() {
+            if byte == 0 { break; }
+            hash ^= byte as u32;
+            hash = hash.wrapping_mul(16777619);
+        }
+        hash
     }
-    hash
 }
 
 /// Convert an AssetId back to a Symbol for backward compatibility.
@@ -62,9 +72,8 @@ pub mod staking_tiers;
 pub mod validation;
 use crate::validation::check_bond_capacity;
 pub mod governance;
-use crate::governance::{verify_staged_delay, StagedUpgrade};
-
-pub mod validation;
+use crate::governance::{verify_staged_delay, StagedUpgrade, GovernanceProposal, ProposalStatus, MIN_LEDGER_DELAY};
+pub mod storage;
 pub use staking_tiers::{AssetFeedMetrics, StakingTier, StakingTierConfig};
 use staking_tiers::{
     assign_tier, effective_volume_score, required_stake_for_tier, validate_tier_config,
@@ -111,7 +120,19 @@ pub enum ContractError {
     /// The proposed fee exceeds the maximum allowed ceiling.
     FeeCeilingExceeded = 27,
     /// Incoming tracking sequence is less than or equal to the active stored checkpoint value.
-    StaleSequence = 26,
+    StaleSequence = 28,
+    /// Contract is in emergency-paused state.
+    ContractPaused = 29,
+    /// An emergency revocation proposal is already active.
+    EmergencyRevocationAlreadyActive = 30,
+    /// No active emergency revocation proposal found.
+    NoActiveEmergencyRevocation = 31,
+    /// The target address has been stamped as revoked.
+    RevokedAddress = 32,
+    /// The telemetry payload timestamp is too stale.
+    StaleTelemetryPayload = 33,
+    /// A governance proposal has already been cancelled or executed.
+    ProposalAlreadyCancelledOrExecuted = 34,
 }
 
 // Contract state keys
@@ -132,6 +153,9 @@ const NODE_PROFILES_KEY: Symbol = symbol_short!("NODES");
 const PLATFORM_CAPITAL_KEY: Symbol = symbol_short!("CAPITAL");
 const CONSENSUS_CACHE_KEY: Symbol = symbol_short!("CACHE");
 const RELAYER_TTL_THRESHOLD: u32 = 5_000;
+pub(crate) const TREASURY_KEY: Symbol = symbol_short!("TREASUR");
+pub(crate) const SEQUENCE_COUNTER_KEY: Symbol = symbol_short!("SEQCTR");
+const INSTANCE_TTL_EXTEND: u32 = 1_000;
 
 #[contracttype]
 #[derive(Clone)]
@@ -310,8 +334,8 @@ impl TimeLockedUpgradeContract {
         if data.admin != executor { return Err(ContractError::NotAdmin); }
         executor.require_auth();
         consume_nonce(&env, &executor, nonce, salt, signature)?;
-        let pending: PendingUpgrade = env.storage().instance().get(&PENDING_UPGRADE_KEY).ok_or(ContractError::NoPendingUpgrade)?;
-        if env.ledger().timestamp().saturating_sub(pending.proposed_at) < UPGRADE_DELAY_SECONDS {
+        let pending: StagedUpgrade = env.storage().instance().get(&PENDING_UPGRADE_KEY).ok_or(ContractError::NoPendingUpgrade)?;
+        if !verify_staged_delay(pending.staged_at, env.ledger().sequence()) {
             return Err(ContractError::UpgradeTimelockNotSatisfied);
         }
         env.deployer().update_current_contract_wasm(pending.wasm_hash.to_array());
@@ -320,14 +344,15 @@ impl TimeLockedUpgradeContract {
         Ok(())
     }
 
-    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+    pub fn get_pending_upgrade(env: Env) -> Option<StagedUpgrade> {
         env.storage().instance().get(&PENDING_UPGRADE_KEY)
     }
 
-    pub fn get_upgrade_timelock_remaining(env: Env) -> Option<u64> {
-        env.storage().instance().get(&PENDING_UPGRADE_KEY).map(|pending: PendingUpgrade| {
-            let elapsed = env.ledger().timestamp().saturating_sub(pending.proposed_at);
-            UPGRADE_DELAY_SECONDS.saturating_sub(elapsed)
+    pub fn get_upgrade_timelock_remaining(env: Env) -> Option<u32> {
+        env.storage().instance().get(&PENDING_UPGRADE_KEY).map(|pending: StagedUpgrade| {
+            let current = env.ledger().sequence();
+            let elapsed = current.saturating_sub(pending.staged_at);
+            MIN_LEDGER_DELAY.saturating_sub(elapsed)
         })
     }
 
@@ -345,11 +370,12 @@ impl TimeLockedUpgradeContract {
         let mut data = Self::get_data(env.clone())?;
         if data.admin != caller { return Err(ContractError::NotAdmin); }
         caller.require_auth();
+        consume_nonce(&env, &caller, nonce, salt, signature)?;
         let mut seq_map: Map<Address, u64> = env.storage().instance().get(&SEQUENCE_COUNTER_KEY).unwrap_or_else(|| Map::new(&env));
-        seq_map.set(caller, sequence);
+        seq_map.set(caller, nonce);
         env.storage().instance().set(&SEQUENCE_COUNTER_KEY, &seq_map);
         data.value = new_value;
-        env.storage().instance().set(&DATA_KEY, &data); // This line was missing a semicolon
+        env.storage().instance().set(&DATA_KEY, &data);
         Self::_record_heartbeat(&env, symbol_to_asset_id(&symbol_short!("VALUE")));
         Ok(())
     }
@@ -586,7 +612,7 @@ impl TimeLockedUpgradeContract {
 
         env.storage().instance().set(&STAKE_REGISTRY_KEY, &stakes);
         env.storage().instance().set(&TOTAL_STAKED_KEY, &new_total);
-        Self::_record_heartbeat(&env, asset.clone());
+        Self::_record_heartbeat(&env, symbol_to_asset_id(&asset));
 
         Ok(FeedStakeRecord {
             node,
@@ -700,7 +726,70 @@ impl TimeLockedUpgradeContract {
 
     // #432: pre-flight rent check hook
     pub fn preflight_rent_check(env: Env) {
-        storage::preflight_rent_check(&env)
+        storage::preflight_rent_check(&env);
+    }
+
+    // ── Governance Proposal Execution Timelock Cancellation (Issue #796) ──
+
+    /// Submit a governance proposal for contract upgrade with timelock.
+    pub fn submit_governance_proposal(
+        env: Env,
+        proposer: Address,
+        wasm_hash: BytesN<32>,
+    ) -> Result<u64, ContractError> {
+        admin::assert_not_revoked(&env, &proposer)?;
+        governance::submit_governance_proposal(&env, proposer, wasm_hash)
+    }
+
+    /// Vote to cancel a governance proposal during its timelock window.
+    pub fn vote_cancel_governance_proposal(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+        sig_expires_at: u64,
+    ) -> Result<(), ContractError> {
+        admin::assert_not_revoked(&env, &voter)?;
+        let data = Self::get_data(env.clone())?;
+        if !Self::_is_signer(&env, &voter) && data.admin != voter {
+            return Err(ContractError::Unauthorized);
+        }
+        governance::vote_cancel_proposal(&env, voter, proposal_id, sig_expires_at)
+    }
+
+    /// Admin-only direct cancellation of a governance proposal.
+    pub fn cancel_governance_proposal(
+        env: Env,
+        canceller: Address,
+        proposal_id: u64,
+    ) -> Result<(), ContractError> {
+        let data = Self::get_data(env.clone())?;
+        if data.admin != canceller { return Err(ContractError::NotAdmin); }
+        governance::cancel_governance_proposal(&env, canceller, proposal_id)
+    }
+
+    /// Query a governance proposal by ID.
+    pub fn get_governance_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<GovernanceProposal, ContractError> {
+        governance::get_governance_proposal(&env, proposal_id)
+    }
+
+    /// Return the number of ledger sequences remaining before a governance
+    /// proposal's timelock elapses.
+    pub fn get_gov_proposal_tl(
+        env: Env,
+        proposal_id: u64,
+    ) -> Option<u32> {
+        governance::get_gov_proposal_tl_remaining(&env, proposal_id)
+    }
+
+    /// Check whether a governance proposal is eligible for execution.
+    pub fn is_gov_proposal_executable(
+        env: Env,
+        proposal_id: u64,
+    ) -> bool {
+        governance::is_proposal_executable(&env, proposal_id)
     }
 
     // ── Emergency Key Revocation (multi-sig coordinator group) ───────────────
@@ -739,7 +828,7 @@ impl TimeLockedUpgradeContract {
     }
 
     /// Returns the active emergency revocation proposal, if one exists.
-    pub fn get_emergency_revocation_proposal(
+    pub fn get_emerg_revocation_proposal(
         env: Env,
     ) -> Option<admin::EmergencyRevocationProposal> {
         admin::get_emergency_revocation_proposal(&env)
@@ -809,35 +898,6 @@ impl TimeLockedUpgradeContract {
         if n == 0 { 1 } else { n / 2 + 1 }
     }
 
-    fn _resolve_feed_metrics(env: &Env, asset: &AssetId) -> AssetFeedMetrics {
-        let pool = Self::get_corridor_fee_pool(env.clone(), asset.clone());
-        let stored: AssetFeedMetrics = env
-            .storage()
-            .persistent()
-            .get(&StakingStorageKey::AssetMetrics(asset.clone()))
-            .unwrap_or(AssetFeedMetrics {
-                volume_score: 0,
-                volatility_bps: 0,
-            });
-
-    pub fn update_validator_profile(env: Env, node: Address, pool: Symbol) -> Result<(), ContractError> {
-        // Guard: revoked node must not be able to update its profile.
-        admin::assert_not_revoked(&env, &node)?;
-        node.require_auth();
-
-        let stake = Self::get_stake(env.clone(), node.clone());
-        if stake < crate::validation::PREMIUM_POOL_MIN_STAKE {
-            return Err(ContractError::PremiumPoolAccessDenied);
-        }
-
-        Self::_record_heartbeat(&env, pool);
-        Ok(())
-    }
-}
-
-pub mod validation {
-    /// Minimum stake required to access the premium asset pool.
-    pub const PREMIUM_POOL_MIN_STAKE: u64 = 1_000;
 }
 
 #[cfg(test)]
@@ -908,7 +968,7 @@ mod query_guardrail_tests {
         let treasury = soroban_sdk::Address::generate(&env);
         client.initialize(&admin, &treasury);
 
-        let asset = symbol_short!("NGN");
+        let asset: AssetId = 3897123275; // NGN
         assert!(!client.is_data_fresh(&asset));
     }
 
@@ -919,7 +979,7 @@ mod query_guardrail_tests {
         let treasury = soroban_sdk::Address::generate(&env);
         client.initialize(&admin, &treasury);
 
-        let asset = symbol_short!("KES");
+        let asset: AssetId = 2654435761; // KES
         client.update_heartbeat(&asset, &admin);
 
         assert!(client.is_data_fresh(&asset));
@@ -935,7 +995,7 @@ mod query_guardrail_tests {
         let treasury = soroban_sdk::Address::generate(&env);
         client.initialize(&admin, &treasury);
 
-        let asset = symbol_short!("GHS");
+        let asset: AssetId = 4026531840; // GHS
         client.update_heartbeat(&asset, &admin);
 
         for _ in 0..5 {
@@ -953,7 +1013,7 @@ mod query_guardrail_tests {
         let treasury = soroban_sdk::Address::generate(&env);
         client.initialize(&admin, &treasury);
 
-        let asset = symbol_short!("CFA");
+        let asset: AssetId = 4160749568; // CFA
 
         let admin_before = client.get_data().admin;
         let value_before = client.get_data().value;

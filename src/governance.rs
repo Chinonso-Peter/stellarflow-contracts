@@ -1,13 +1,595 @@
-use soroban_sdk::contracttype;
+//! Governance Proposal Execution Timelock Cancellation Handler (Issue #796).
+//!
+//! Provides a governance framework where proposals enter a timelock period
+//! before execution. During the timelock window, registered signers or the
+//! admin may vote to cancel a proposal. Once the cancellation quorum is
+//! reached the proposal is marked `Cancelled` and can no longer be executed.
+//!
+//! The handler also supports direct admin cancellation for emergency scenarios.
 
-const MIN_LEDGER_DELAY: u32 = 5000;
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Map, Symbol};
 
+/// Legacy staged upgrade record used by the `propose_upgrade` / `execute_upgrade` flow.
 #[contracttype]
+#[derive(Clone)]
 pub struct StagedUpgrade {
-    pub wasm_hash: soroban_sdk::BytesN<32>,
+    pub wasm_hash: BytesN<32>,
     pub staged_at: u32,
 }
 
+use crate::ContractError;
+
+// ── Constants ───────────────────────────────────────────────────────────────
+
+/// Minimum number of ledger sequences that must elapse between proposal
+/// submission and eligible execution.
+pub const MIN_LEDGER_DELAY: u32 = 5000;
+
+/// Storage key for the active governance proposal (only one at a time).
+pub(crate) const GOVERNANCE_PROPOSAL_KEY: Symbol = symbol_short!("GOVPROP");
+
+/// Storage key for the proposal ID counter (monotonically increasing).
+pub(crate) const GOV_PROPOSAL_COUNTER_KEY: Symbol = symbol_short!("GOVCNT");
+
+/// Storage key for the cancellation quorum threshold (number of votes required
+/// to cancel a proposal during the timelock window).
+pub(crate) const GOV_CANCEL_THRESHOLD_KEY: Symbol = symbol_short!("GOVTHRSH");
+
+// ── Types ───────────────────────────────────────────────────────────────────
+
+/// Lifecycle status of a governance proposal.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProposalStatus {
+    /// Proposal is active and in its timelock window.
+    Pending,
+    /// Timelock has elapsed and the proposal is eligible for execution.
+    Executable,
+    /// Cancelled during the timelock window by authorised signers.
+    Cancelled,
+}
+
+/// A governance proposal that wraps a contract upgrade with full lifecycle
+/// tracking including cancellation support.
+#[contracttype]
+#[derive(Clone)]
+pub struct GovernanceProposal {
+    /// Unique monotonically-increasing identifier.
+    pub proposal_id: u64,
+    /// WASM hash of the proposed upgrade.
+    pub wasm_hash: BytesN<32>,
+    /// Address that submitted the proposal.
+    pub proposer: Address,
+    /// Ledger sequence at which the proposal was submitted.
+    pub staged_at: u32,
+    /// Current lifecycle status.
+    pub status: ProposalStatus,
+    /// Set of addresses that have voted to cancel this proposal.
+    pub cancellation_votes: Map<Address, ()>,
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
+
+/// Submit a governance proposal. The proposal enters a timelock period
+/// (`MIN_LEDGER_DELAY` ledger sequences) before it can be executed.
+///
+/// Only one governance proposal may be active at a time. Returns the
+/// assigned proposal ID.
+pub fn submit_governance_proposal(
+    env: &Env,
+    proposer: Address,
+    wasm_hash: BytesN<32>,
+) -> Result<u64, ContractError> {
+    // Only one active proposal at a time.
+    if env.storage().instance().has(&GOVERNANCE_PROPOSAL_KEY) {
+        let existing: GovernanceProposal = env
+            .storage()
+            .instance()
+            .get(&GOVERNANCE_PROPOSAL_KEY)
+            .unwrap();
+        if existing.status == ProposalStatus::Pending
+            || existing.status == ProposalStatus::Executable
+        {
+            return Err(ContractError::ProposalAlreadyActive);
+        }
+    }
+
+    proposer.require_auth();
+
+    let proposal_id = _next_proposal_id(env);
+    let proposal = GovernanceProposal {
+        proposal_id,
+        wasm_hash,
+        proposer: proposer.clone(),
+        staged_at: env.ledger().sequence(),
+        status: ProposalStatus::Pending,
+        cancellation_votes: Map::new(env),
+    };
+
+    env.storage()
+        .instance()
+        .set(&GOVERNANCE_PROPOSAL_KEY, &proposal);
+
+    env.events().publish(
+        (symbol_short!("GovProp"), proposal_id),
+        (proposer, proposal.staged_at),
+    );
+
+    Ok(proposal_id)
+}
+
+/// Vote to cancel a governance proposal during its timelock window.
+///
+/// Once the number of cancellation votes meets or exceeds the cancellation
+/// threshold the proposal status is set to `Cancelled` and it can no longer
+/// be executed.
+///
+/// Only registered signers or the admin may vote. A voter may not vote
+/// twice on the same proposal.
+pub fn vote_cancel_proposal(
+    env: &Env,
+    voter: Address,
+    proposal_id: u64,
+    sig_expires_at: u64,
+) -> Result<(), ContractError> {
+    if env.ledger().timestamp() > sig_expires_at {
+        return Err(ContractError::SignatureExpired);
+    }
+    voter.require_auth();
+
+    let mut proposal = _load_proposal(env)?;
+
+    if proposal.proposal_id != proposal_id {
+        return Err(ContractError::NoActiveProposal);
+    }
+
+    if proposal.status != ProposalStatus::Pending {
+        return Err(ContractError::ProposalAlreadyCancelledOrExecuted);
+    }
+
+    // Prevent double-voting.
+    if proposal.cancellation_votes.contains_key(voter.clone()) {
+        return Err(ContractError::AlreadyVoted);
+    }
+
+    proposal.cancellation_votes.set(voter, ());
+
+    let threshold = _cancellation_threshold(env);
+
+    if proposal.cancellation_votes.len() >= threshold {
+        proposal.status = ProposalStatus::Cancelled;
+        env.events().publish(
+            (symbol_short!("GovCancel"), proposal_id),
+            proposal.cancellation_votes.len(),
+        );
+    }
+
+    env.storage()
+        .instance()
+        .set(&GOVERNANCE_PROPOSAL_KEY, &proposal);
+
+    Ok(())
+}
+
+/// Direct admin cancellation of a governance proposal during its timelock
+/// window.  Bypasses the voting process for emergency scenarios.
+///
+/// Fails if no active pending proposal exists or the caller is not the
+/// contract admin.
+pub fn cancel_governance_proposal(
+    env: &Env,
+    canceller: Address,
+    proposal_id: u64,
+) -> Result<(), ContractError> {
+    canceller.require_auth();
+
+    let mut proposal = _load_proposal(env)?;
+
+    if proposal.proposal_id != proposal_id {
+        return Err(ContractError::NoActiveProposal);
+    }
+
+    if proposal.status != ProposalStatus::Pending {
+        return Err(ContractError::ProposalAlreadyCancelledOrExecuted);
+    }
+
+    proposal.status = ProposalStatus::Cancelled;
+
+    env.storage()
+        .instance()
+        .set(&GOVERNANCE_PROPOSAL_KEY, &proposal);
+
+    env.events().publish(
+        (symbol_short!("GovCancel"), proposal_id),
+        canceller,
+    );
+
+    Ok(())
+}
+
+/// Query the current governance proposal, if one exists.
+pub fn get_governance_proposal(
+    env: &Env,
+    proposal_id: u64,
+) -> Result<GovernanceProposal, ContractError> {
+    let proposal = _load_proposal(env)?;
+    if proposal.proposal_id != proposal_id {
+        return Err(ContractError::NoActiveProposal);
+    }
+    Ok(proposal)
+}
+
+/// Return the number of ledger sequences remaining before a governance
+/// proposal's timelock elapses and it becomes eligible for execution.
+///
+/// Returns `None` if no active proposal with the given ID exists.
+pub fn get_gov_proposal_tl_remaining(
+    env: &Env,
+    proposal_id: u64,
+) -> Option<u32> {
+    env.storage()
+        .instance()
+        .get::<_, GovernanceProposal>(&GOVERNANCE_PROPOSAL_KEY)
+        .and_then(|proposal| {
+            if proposal.proposal_id != proposal_id {
+                return None;
+            }
+            if proposal.status != ProposalStatus::Pending {
+                return None;
+            }
+            let current = env.ledger().sequence();
+            let elapsed = current.saturating_sub(proposal.staged_at);
+            Some(MIN_LEDGER_DELAY.saturating_sub(elapsed))
+        })
+}
+
+/// Check whether the timelock has elapsed for a given proposal.
+pub fn is_proposal_executable(env: &Env, proposal_id: u64) -> bool {
+    match env
+        .storage()
+        .instance()
+        .get::<_, GovernanceProposal>(&GOVERNANCE_PROPOSAL_KEY)
+    {
+        Some(proposal) if proposal.proposal_id == proposal_id => {
+            proposal.status == ProposalStatus::Executable
+                || (proposal.status == ProposalStatus::Pending
+                    && verify_staged_delay(proposal.staged_at, env.ledger().sequence()))
+        }
+        _ => false,
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Verify that at least `MIN_LEDGER_DELAY` ledger sequences have elapsed
+/// since `staged_at`.
 pub fn verify_staged_delay(staged_at: u32, current_ledger: u32) -> bool {
     current_ledger.saturating_sub(staged_at) >= MIN_LEDGER_DELAY
+}
+
+fn _load_proposal(env: &Env) -> Result<GovernanceProposal, ContractError> {
+    env.storage()
+        .instance()
+        .get(&GOVERNANCE_PROPOSAL_KEY)
+        .ok_or(ContractError::NoActiveProposal)
+}
+
+fn _next_proposal_id(env: &Env) -> u64 {
+    let current: u64 = env
+        .storage()
+        .instance()
+        .get(&GOV_PROPOSAL_COUNTER_KEY)
+        .unwrap_or(0u64);
+    let next = current + 1;
+    env.storage()
+        .instance()
+        .set(&GOV_PROPOSAL_COUNTER_KEY, &next);
+    next
+}
+
+/// The cancellation quorum is the number of distinct signer votes required
+/// to cancel a proposal during the timelock window.  If fewer than 2
+/// signers are registered, the threshold defaults to 1 (admin can cancel
+/// unilaterally).  Otherwise it is `signers / 2 + 1` (simple majority).
+pub fn cancellation_threshold(signer_count: u32) -> u32 {
+    if signer_count < 2 { 1 } else { signer_count / 2 + 1 }
+}
+
+/// Return the cancellation threshold based on the current signer set
+/// stored under the given signers key.
+pub fn _cancellation_threshold_for_signers(
+    env: &Env,
+    signers_key: &Symbol,
+) -> u32 {
+    let signers: Map<Address, ()> = env
+        .storage()
+        .instance()
+        .get(signers_key)
+        .unwrap_or_else(|| Map::new(env));
+    cancellation_threshold(signers.len())
+}
+
+fn _cancellation_threshold(env: &Env) -> u32 {
+    _cancellation_threshold_for_signers(env, &crate::SIGNERS_KEY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
+
+    fn setup() -> (Env, crate::TimeLockedUpgradeContractClient<'static>) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, crate::TimeLockedUpgradeContract);
+        let client = crate::TimeLockedUpgradeContractClient::new(&env, &id);
+        (env, client)
+    }
+
+    fn advance_ledgers(env: &Env, delta: u32) {
+        let info = env.ledger().get();
+        env.ledger().set(LedgerInfo {
+            sequence_number: info.sequence_number + delta,
+            ..info
+        });
+    }
+
+    fn make_wasm_hash(env: &soroban_sdk::Env) -> BytesN<32> {
+        BytesN::from_array(env, &[42u8; 32])
+    }
+
+    #[test]
+    fn test_submit_governance_proposal() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let proposal_id = client.submit_governance_proposal(&admin, &wasm_hash);
+
+        assert_eq!(proposal_id, 1);
+
+        let proposal = client.get_governance_proposal(&proposal_id);
+        assert_eq!(proposal.proposal_id, 1);
+        assert_eq!(proposal.wasm_hash, wasm_hash);
+        assert_eq!(proposal.status, ProposalStatus::Pending);
+    }
+
+    #[test]
+    fn test_submit_prevents_duplicate_active_proposals() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let _ = client.submit_governance_proposal(&admin, &wasm_hash);
+
+        let wasm_hash2 = BytesN::from_array(&env, &[99u8; 32]);
+        let result = client.try_submit_governance_proposal(&admin, &wasm_hash2);
+        assert_eq!(result, Err(Ok(ContractError::ProposalAlreadyActive)));
+    }
+
+    #[test]
+    fn test_submit_allows_new_proposal_after_cancellation() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let id1 = client.submit_governance_proposal(&admin, &wasm_hash);
+        let _ = client.cancel_governance_proposal(&admin, &id1);
+
+        let wasm_hash2 = BytesN::from_array(&env, &[99u8; 32]);
+        let id2 = client.submit_governance_proposal(&admin, &wasm_hash2);
+        assert_eq!(id2, 2);
+    }
+
+    #[test]
+    fn test_cancel_governance_proposal_by_admin() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let proposal_id = client.submit_governance_proposal(&admin, &wasm_hash);
+
+        client.cancel_governance_proposal(&admin, &proposal_id);
+
+        let proposal = client.get_governance_proposal(&proposal_id);
+        assert_eq!(proposal.status, ProposalStatus::Cancelled);
+    }
+
+    #[test]
+    fn test_cancel_nonexistent_proposal_fails() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let result = client.try_cancel_governance_proposal(&admin, &999);
+        assert_eq!(result, Err(Ok(ContractError::NoActiveProposal)));
+    }
+
+    #[test]
+    fn test_cancel_already_cancelled_fails() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let proposal_id = client.submit_governance_proposal(&admin, &wasm_hash);
+        client.cancel_governance_proposal(&admin, &proposal_id);
+
+        let result = client.try_cancel_governance_proposal(&admin, &proposal_id);
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::ProposalAlreadyCancelledOrExecuted))
+        );
+    }
+
+    #[test]
+    fn test_timelock_remaining_counts_down() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let proposal_id = client.submit_governance_proposal(&admin, &wasm_hash);
+
+        let remaining = client.get_gov_proposal_tl(&proposal_id);
+        assert_eq!(remaining, Some(MIN_LEDGER_DELAY));
+
+        advance_ledgers(&env, 1000);
+        let remaining = client.get_gov_proposal_tl(&proposal_id);
+        assert_eq!(remaining, Some(MIN_LEDGER_DELAY - 1000));
+
+        advance_ledgers(&env, MIN_LEDGER_DELAY - 1000);
+        let remaining = client.get_gov_proposal_tl(&proposal_id);
+        assert_eq!(remaining, Some(0));
+    }
+
+    #[test]
+    fn test_timelock_remaining_none_after_cancellation() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let proposal_id = client.submit_governance_proposal(&admin, &wasm_hash);
+        client.cancel_governance_proposal(&admin, &proposal_id);
+
+        let remaining = client.get_gov_proposal_tl(&proposal_id);
+        assert_eq!(remaining, None);
+    }
+
+    #[test]
+    fn test_vote_cancel_reaches_threshold() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let signer1 = soroban_sdk::Address::generate(&env);
+        let signer2 = soroban_sdk::Address::generate(&env);
+        client.register_signer(&signer1, &admin);
+        client.register_signer(&signer2, &admin);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let proposal_id = client.submit_governance_proposal(&admin, &wasm_hash);
+
+        // With 2 signers + admin = 3, threshold is 3/2 + 1 = 2
+        client.vote_cancel_governance_proposal(&signer1, &proposal_id, &u64::MAX);
+
+        let proposal = client.get_governance_proposal(&proposal_id);
+        assert_eq!(proposal.status, ProposalStatus::Pending); // Not yet cancelled (1 vote < 2)
+
+        client.vote_cancel_governance_proposal(&signer2, &proposal_id, &u64::MAX);
+
+        let proposal = client.get_governance_proposal(&proposal_id);
+        assert_eq!(proposal.status, ProposalStatus::Cancelled); // 2 votes >= threshold
+    }
+
+    #[test]
+    fn test_double_vote_rejected() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        // Register 2 signers so threshold is 2 (> 1 vote)
+        let signer1 = soroban_sdk::Address::generate(&env);
+        let signer2 = soroban_sdk::Address::generate(&env);
+        client.register_signer(&signer1, &admin);
+        client.register_signer(&signer2, &admin);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let proposal_id = client.submit_governance_proposal(&admin, &wasm_hash);
+
+        // First vote succeeds (1 < threshold of 2)
+        client.vote_cancel_governance_proposal(&signer1, &proposal_id, &u64::MAX);
+
+        // Second vote from same signer is rejected
+        let result = client.try_vote_cancel_governance_proposal(&signer1, &proposal_id, &u64::MAX);
+        assert_eq!(result, Err(Ok(ContractError::AlreadyVoted)));
+    }
+
+    #[test]
+    fn test_cancellation_threshold_formula() {
+        assert_eq!(cancellation_threshold(0), 1);
+        assert_eq!(cancellation_threshold(1), 1);
+        assert_eq!(cancellation_threshold(2), 2);
+        assert_eq!(cancellation_threshold(3), 2);
+        assert_eq!(cancellation_threshold(5), 3);
+        assert_eq!(cancellation_threshold(7), 4);
+    }
+
+    #[test]
+    fn test_staged_delay_verification() {
+        assert!(verify_staged_delay(0, MIN_LEDGER_DELAY));
+        assert!(verify_staged_delay(0, MIN_LEDGER_DELAY + 1));
+        assert!(!verify_staged_delay(0, MIN_LEDGER_DELAY - 1));
+        assert!(verify_staged_delay(100, 100 + MIN_LEDGER_DELAY));
+        assert!(!verify_staged_delay(100, 100 + MIN_LEDGER_DELAY - 1));
+    }
+
+    #[test]
+    fn test_is_proposal_executable_after_timelock() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let proposal_id = client.submit_governance_proposal(&admin, &wasm_hash);
+
+        assert!(!client.is_gov_proposal_executable(&proposal_id));
+
+        advance_ledgers(&env, MIN_LEDGER_DELAY);
+        assert!(client.is_gov_proposal_executable(&proposal_id));
+    }
+
+    #[test]
+    fn test_is_proposal_executable_false_when_cancelled() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let wasm_hash = make_wasm_hash(&env);
+        let proposal_id = client.submit_governance_proposal(&admin, &wasm_hash);
+        client.cancel_governance_proposal(&admin, &proposal_id);
+
+        advance_ledgers(&env, MIN_LEDGER_DELAY);
+        assert!(!client.is_gov_proposal_executable(&proposal_id));
+    }
+
+    #[test]
+    fn test_proposal_id_increments() {
+        let (env, client) = setup();
+        let admin = soroban_sdk::Address::generate(&env);
+        let treasury = soroban_sdk::Address::generate(&env);
+        client.initialize(&admin, &treasury);
+
+        let wasm1 = BytesN::from_array(&env, &[1u8; 32]);
+        let id1 = client.submit_governance_proposal(&admin, &wasm1);
+        client.cancel_governance_proposal(&admin, &id1);
+
+        let wasm2 = BytesN::from_array(&env, &[2u8; 32]);
+        let id2 = client.submit_governance_proposal(&admin, &wasm2);
+        client.cancel_governance_proposal(&admin, &id2);
+
+        let wasm3 = BytesN::from_array(&env, &[3u8; 32]);
+        let id3 = client.submit_governance_proposal(&admin, &wasm3);
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+    }
 }

@@ -23,3 +23,15 @@ pub fn check_subscription(env: &Env, consumer_id: Address) -> bool {
         false
     }
 }
+
+/// Pre-flight rent check hook (Issue #432).
+///
+/// Verifies that persistent storage entries have sufficient TTL remaining
+/// before the contract commits to a state-changing operation.  This is a
+/// no-op safety check that can be expanded with concrete rent validation
+/// logic as storage rent policies evolve.
+pub fn preflight_rent_check(_env: &Env) {
+    // Intentionally a no-op for now; callers may expand this with
+    // concrete rent-budget checks as the storage rent lifecycle
+    // (Issue #432) matures.
+}

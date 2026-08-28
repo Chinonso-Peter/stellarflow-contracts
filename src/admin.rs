@@ -1,6 +1,20 @@
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Map, Symbol};
 use crate::{ContractData, ContractError, DATA_KEY, SIGNERS_KEY, REVOKED_SIGNER_KEY};
 
+/// Read the current signer set from instance storage.
+pub(crate) fn _get_signers(env: &Env) -> Map<Address, ()> {
+    env.storage()
+        .instance()
+        .get(&SIGNERS_KEY)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+/// Simple majority threshold for revocation / cancellation votes.
+pub(crate) fn _revocation_threshold(env: &Env) -> u32 {
+    let n = _get_signers(env).len();
+    if n == 0 { 1 } else { n / 2 + 1 }
+}
+
 pub(crate) const PENDING_OWNER_KEY: Symbol = symbol_short!("PNDOWN");
 pub(crate) const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
 

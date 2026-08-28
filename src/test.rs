@@ -48,7 +48,7 @@ fn test_initialize_and_basic_functionality() {
     assert_eq!(data.value, 0);
 
     let (salt, signature) = nonce_proof(&env, 0, b"set-value-0");
-    client.set_value(&42, &admin, &0, &salt, &signature, &u64::MAX, &0);
+    client.set_value(&42, &admin, &0, &salt, &signature, &u64::MAX);
     let data = client.get_data();
     assert_eq!(data.value, 42);
     assert_eq!(client.get_coordinator_nonce(&admin), 1);
@@ -97,7 +97,7 @@ fn test_set_value_rejects_bad_salt_signature() {
     let salt = Bytes::from_slice(&env, b"bad-salt");
     let bad_signature = soroban_sdk::BytesN::from_array(&env, &[9u8; 32]);
 
-    let result = client.try_set_value(&42, &admin, &0, &salt, &bad_signature, &u64::MAX, &0);
+    let result = client.try_set_value(&42, &admin, &0, &salt, &bad_signature, &u64::MAX);
     assert_eq!(result, Err(Ok(ContractError::InvalidSaltSignature)));
 }
 
@@ -194,6 +194,7 @@ fn test_heartbeat_fresh_data() {
     client.initialize(&admin, &treasury);
 
     let asset: AssetId = 3897123275; // NGN
+    let asset_sym = symbol_short!("NGN");
 
     // Update heartbeat
     client.update_heartbeat(&asset, &admin);
@@ -202,7 +203,7 @@ fn test_heartbeat_fresh_data() {
     assert!(client.is_data_fresh(&asset));
 
     // Verify timestamp was recorded
-    let ts = client.get_last_update_timestamp(&asset);
+    let ts = client.get_last_update_timestamp(&asset_sym);
     assert!(ts.is_some());
     assert_eq!(ts.unwrap(), env.ledger().timestamp());
 }
@@ -246,7 +247,7 @@ fn test_heartbeat_never_updated() {
 
     // No heartbeat recorded → should be stale
     assert!(!client.is_data_fresh(&asset));
-    assert!(client.get_last_update_timestamp(&asset).is_none());
+    assert!(client.get_last_update_timestamp(&symbol_short!("GHS")).is_none());
 }
 
 #[test]
@@ -593,8 +594,8 @@ fn test_regional_feed_allows_lower_stake_than_premier_feed() {
     let treasury = soroban_sdk::Address::generate(&env);
     client.initialize(&admin, &treasury);
 
-    let regional: AssetId = 2654435761; // KES
-    let premier: AssetId = 3897123275; // NGN
+    let regional = symbol_short!("KES");
+    let premier = symbol_short!("NGN");
 
     let signers = soroban_sdk::vec![&env, admin.clone(), admin.clone()];
     client.set_asset_feed_metrics(&admin, &regional, &10, &100, &signers);
@@ -630,7 +631,7 @@ fn test_corridor_volume_bumps_tier_requirements() {
     let treasury = soroban_sdk::Address::generate(&env);
     client.initialize(&admin, &treasury);
 
-    let asset: AssetId = 4026531840; // GHS
+    let asset = symbol_short!("GHS");
     client.set_asset_feed_metrics(&admin, &asset, &10, &200, &soroban_sdk::vec![&env, admin.clone()]);
 
     assert_eq!(client.get_staking_tier(&asset), StakingTier::Regional);
@@ -661,10 +662,9 @@ fn test_custom_tier_config_is_enforced() {
             standard_min_stake: 2_500,
             premier_min_stake: 25_000,
         },
-        &signers,
     );
 
-    let asset: AssetId = 3219226362; // ZAR
+    let asset = symbol_short!("ZAR");
     client.set_asset_feed_metrics(&admin, &asset, &10, &100, &signers);
 
     assert_eq!(client.get_required_stake(&asset), 250u64);
@@ -688,7 +688,7 @@ fn test_unstake_from_feed_updates_totals() {
     let treasury = soroban_sdk::Address::generate(&env);
     client.initialize(&admin, &treasury);
 
-    let asset: AssetId = 2863311530; // UGX
+    let asset = symbol_short!("UGX");
     client.set_asset_feed_metrics(&admin, &asset, &10, &100, &soroban_sdk::vec![&env, admin.clone()]);
     client.stake_and_register_for_feed(&node, &asset, &100u64);
 
@@ -710,17 +710,18 @@ fn test_set_value_updates_heartbeat() {
     client.initialize(&admin, &treasury);
 
     let value_asset: AssetId = 1; // VALUE
+    let value_sym = symbol_short!("VALUE");
 
     // Before set_value, no heartbeat exists for "VALUE"
     assert!(!client.is_data_fresh(&value_asset));
 
     // Call set_value — should auto-record heartbeat
     let (salt, signature) = nonce_proof(&env, 0, b"set-value-1");
-    client.set_value(&42, &admin, &0, &salt, &signature, &u64::MAX, &0);
+    client.set_value(&42, &admin, &0, &salt, &signature, &u64::MAX);
 
     // Now the "VALUE" asset should have a fresh heartbeat
     assert!(client.is_data_fresh(&value_asset));
-    assert!(client.get_last_update_timestamp(&value_asset).is_some());
+    assert!(client.get_last_update_timestamp(&value_sym).is_some());
 
     // Fast-forward past interval → data goes stale
     advance_ledger_timestamp(&env, DEFAULT_HEARTBEAT_INTERVAL + 1);
@@ -728,7 +729,7 @@ fn test_set_value_updates_heartbeat() {
 
     // Another set_value call refreshes the heartbeat
     let (salt, signature) = nonce_proof(&env, 1, b"set-value-2");
-    client.set_value(&100, &admin, &1, &salt, &signature, &u64::MAX, &1);
+    client.set_value(&100, &admin, &1, &salt, &signature, &u64::MAX);
     assert!(client.is_data_fresh(&value_asset));
 }
 
@@ -760,7 +761,7 @@ fn test_unauthorized_set_value_returns_typed_error() {
     client.initialize(&admin, &treasury);
 
     let (salt, signature) = nonce_proof(&env, 0, b"set-value-unauth");
-    let result = client.try_set_value(&42, &unauthorized, &0u64, &salt, &signature, &u64::MAX, &0);
+    let result = client.try_set_value(&42, &unauthorized, &0u64, &salt, &signature, &u64::MAX);
     assert_eq!(result, Err(Ok(ContractError::NotAdmin)));
 }
 
@@ -800,7 +801,7 @@ fn test_expired_signature_rejected() {
     assert_eq!(result, Err(Ok(ContractError::SignatureExpired)));
 
     let (salt2, signature2) = nonce_proof(&env, 0, b"set-value-expired");
-    let result = client.try_set_value(&42, &admin, &0, &salt2, &signature2, &expired_at, &0);
+    let result = client.try_set_value(&42, &admin, &0, &salt2, &signature2, &expired_at);
     assert_eq!(result, Err(Ok(ContractError::SignatureExpired)));
 }
 
@@ -903,14 +904,14 @@ fn test_emergency_revocation_proposal_opens_successfully() {
     let compromised = soroban_sdk::Address::generate(&env);
     let replacement = soroban_sdk::Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     client.register_signer(&signer_a, &admin);
     client.register_signer(&compromised, &admin);
 
     // Admin opens an emergency revocation proposal against the compromised signer.
     client.propose_emergency_revocation(&admin, &compromised, &replacement);
 
-    let proposal = client.get_emergency_revocation_proposal();
+    let proposal = client.get_emerg_revocation_proposal();
     assert!(proposal.is_some());
     let p = proposal.unwrap();
     assert_eq!(p.target, compromised);
@@ -933,7 +934,7 @@ fn test_emergency_revocation_blocks_target_on_threshold() {
     let compromised = soroban_sdk::Address::generate(&env);
     let replacement = soroban_sdk::Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     // Register three signers (compromised + two honest ones).
     client.register_signer(&signer_a, &admin);
     client.register_signer(&signer_b, &admin);
@@ -946,7 +947,7 @@ fn test_emergency_revocation_blocks_target_on_threshold() {
     client.vote_emergency_revocation(&signer_a, &u64::MAX);
 
     // Proposal should be cleared.
-    assert!(client.get_emergency_revocation_proposal().is_none());
+    assert!(client.get_emerg_revocation_proposal().is_none());
 
     // Target must now be flagged as revoked in storage.
     assert!(client.is_revoked(&compromised));
@@ -964,7 +965,7 @@ fn test_revoked_address_cannot_sign_or_modify_config() {
     let compromised = soroban_sdk::Address::generate(&env);
     let replacement = soroban_sdk::Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     client.register_signer(&signer_a, &admin);
     client.register_signer(&compromised, &admin);
 
@@ -996,7 +997,7 @@ fn test_revoked_admin_cannot_propose_or_execute_upgrade() {
     let signer_a = soroban_sdk::Address::generate(&env);
     let replacement = soroban_sdk::Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     client.register_signer(&signer_a, &admin);
 
     // Revoke the admin (signer_a opens the proposal against the admin).
@@ -1025,7 +1026,7 @@ fn test_compromised_key_cannot_vote_on_its_own_revocation() {
     let compromised = soroban_sdk::Address::generate(&env);
     let replacement = soroban_sdk::Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     client.register_signer(&signer_a, &admin);
     client.register_signer(&compromised, &admin);
 
@@ -1050,7 +1051,7 @@ fn test_double_vote_on_emergency_revocation_is_rejected() {
     let compromised = soroban_sdk::Address::generate(&env);
     let replacement = soroban_sdk::Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     client.register_signer(&signer_a, &admin);
     client.register_signer(&signer_b, &admin);
     client.register_signer(&signer_c, &admin);
@@ -1079,7 +1080,7 @@ fn test_only_one_emergency_proposal_at_a_time() {
     let another_target = soroban_sdk::Address::generate(&env);
     let replacement = soroban_sdk::Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     client.register_signer(&signer_a, &admin);
     client.register_signer(&compromised, &admin);
     client.register_signer(&another_target, &admin);
@@ -1103,7 +1104,7 @@ fn test_emergency_revocation_expired_signature_rejected() {
     let compromised = soroban_sdk::Address::generate(&env);
     let replacement = soroban_sdk::Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     client.register_signer(&signer_a, &admin);
     client.register_signer(&compromised, &admin);
 
@@ -1127,7 +1128,7 @@ fn test_vote_with_no_active_proposal_returns_no_active_error() {
     let admin = soroban_sdk::Address::generate(&env);
     let signer_a = soroban_sdk::Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     client.register_signer(&signer_a, &admin);
 
     // No proposal has been opened yet.
@@ -1147,7 +1148,7 @@ fn test_replacement_signer_promoted_on_revocation() {
     let compromised = soroban_sdk::Address::generate(&env);
     let replacement = soroban_sdk::Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     client.register_signer(&signer_a, &admin);
     client.register_signer(&compromised, &admin);
 
