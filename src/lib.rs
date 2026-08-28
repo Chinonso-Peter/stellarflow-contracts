@@ -1391,6 +1391,32 @@ impl TimeLockedUpgradeContract {
         bridge::escrow::get_config(&env)
     }
 
+    pub fn register_payment_processor(env: Env, admin: Address, processor: BytesN<32>) -> Result<(), ContractError> {
+        bridge::escrow::register_processor(&env, admin, processor)
+    }
+
+    pub fn create_remittance_escrow(
+        env: Env, sender: Address, recipient: Address, primary_token: Address,
+        primary_amount: i128, fee_token: Option<Address>, fee_amount: i128, expires_at: u64,
+    ) -> Result<bridge::escrow::RemittanceEscrow, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        bridge::escrow::create_remittance(&env, sender, recipient, primary_token, primary_amount, fee_token, fee_amount, expires_at)
+    }
+
+    pub fn release_remittance_escrow(env: Env, id: u64, signature: BytesN<64>) -> Result<(), ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        bridge::escrow::release_remittance(&env, id, signature)
+    }
+
+    pub fn cancel_remittance_escrow(env: Env, id: u64, sender: Address) -> Result<(), ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        bridge::escrow::cancel_remittance(&env, id, sender)
+    }
+
+    pub fn get_remittance_escrow(env: Env, id: u64) -> Option<bridge::escrow::RemittanceEscrow> {
+        bridge::escrow::get_remittance(&env, id)
+    }
+
     // --- Private Helpers ---
 
     fn assert_contract_is_active(env: &Env) -> Result<(), ContractError> {

@@ -1,6 +1,6 @@
 //! Native-asset bridge escrow for origin-chain lock and destination proof unlocks.
 
-use soroban_sdk::{contracttype, symbol_short, token, Address, BytesN, Env, Vec};
+use soroban_sdk::{contracttype, symbol_short, token, Address, Bytes, BytesN, Env, Vec};
 
 use crate::{bridge::relayer, ContractData, ContractError, DATA_KEY};
 
@@ -8,6 +8,22 @@ use crate::{bridge::relayer, ContractData, ContractError, DATA_KEY};
 #[derive(Clone, Debug, PartialEq)]
 pub struct BridgeEscrowConfig {
     pub native_token: Address,
+    pub processor: BytesN<32>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemittanceEscrow {
+    pub id: u64,
+    pub sender: Address,
+    pub recipient: Address,
+    pub primary_token: Address,
+    pub primary_amount: i128,
+    pub fee_token: Option<Address>,
+    pub fee_amount: i128,
+    pub expires_at: u64,
+    pub released: bool,
+    pub refunded: bool,
 }
 
 #[contracttype]
@@ -38,6 +54,9 @@ pub enum BridgeEscrowStorageKey {
     NextLockId,
     Lock(u64),
     VaultBalance(Address),
+    Remittance(u64),
+    ProcessorNonce(u64),
+    RemittanceNonce(u64),
 }
 
 fn require_protocol_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
@@ -108,7 +127,9 @@ pub fn configure(
     native_token: Address,
 ) -> Result<BridgeEscrowConfig, ContractError> {
     require_protocol_admin(env, &admin)?;
-    let config = BridgeEscrowConfig { native_token };
+    let processor = env.storage().instance().get(&BridgeEscrowStorageKey::ProcessorNonce(0))
+        .unwrap_or(BytesN::from_array(env, &[0u8; 32]));
+    let config = BridgeEscrowConfig { native_token, processor };
     env.storage()
         .instance()
         .set(&BridgeEscrowStorageKey::Config, &config);
@@ -235,6 +256,75 @@ pub fn vault_balance(env: &Env) -> i128 {
 
 pub fn get_config(env: &Env) -> Option<BridgeEscrowConfig> {
     env.storage().instance().get(&BridgeEscrowStorageKey::Config)
+}
+
+pub fn register_processor(env: &Env, admin: Address, processor: BytesN<32>) -> Result<(), ContractError> {
+    require_protocol_admin(env, &admin)?;
+    let mut config = load_config(env)?;
+    config.processor = processor;
+    env.storage().instance().set(&BridgeEscrowStorageKey::Config, &config);
+    Ok(())
+}
+
+pub fn create_remittance(
+    env: &Env, sender: Address, recipient: Address, primary_token: Address,
+    primary_amount: i128, fee_token: Option<Address>, fee_amount: i128, expires_at: u64,
+) -> Result<RemittanceEscrow, ContractError> {
+    if primary_amount <= 0 || fee_amount < 0 || expires_at <= env.ledger().timestamp() {
+        return Err(ContractError::BridgeInvalidAmount);
+    }
+    sender.require_auth();
+    if fee_token.is_none() && fee_amount != 0 { return Err(ContractError::BridgeInvalidAmount); }
+    token::Client::new(env, &primary_token).transfer(&sender, &env.current_contract_address(), &primary_amount);
+    if let Some(ref fee) = fee_token { token::Client::new(env, fee).transfer(&sender, &env.current_contract_address(), &fee_amount); }
+    let id: u64 = env.storage().instance().get(&BridgeEscrowStorageKey::RemittanceNonce(0)).unwrap_or(0);
+    env.storage().instance().set(&BridgeEscrowStorageKey::RemittanceNonce(0), &(id + 1));
+    let escrow = RemittanceEscrow { id, sender: sender.clone(), recipient: recipient.clone(), primary_token: primary_token.clone(), primary_amount, fee_token: fee_token.clone(), fee_amount, expires_at, released: false, refunded: false };
+    env.storage().persistent().set(&BridgeEscrowStorageKey::Remittance(id), &escrow);
+    env.events().publish((symbol_short!("escrow"), id), (sender, recipient, primary_amount, fee_amount));
+    Ok(escrow)
+}
+
+fn remittance_payload(env: &Env, escrow: &RemittanceEscrow) -> Bytes {
+    let mut payload = Bytes::new(env);
+    payload.append(&Bytes::from_slice(env, &escrow.id.to_be_bytes()));
+    payload.append(&Bytes::from_slice(env, &escrow.sender.to_string().as_bytes()));
+    payload.append(&Bytes::from_slice(env, &escrow.recipient.to_string().as_bytes()));
+    payload.append(&Bytes::from_slice(env, &escrow.primary_token.to_string().as_bytes()));
+    payload.append(&Bytes::from_slice(env, &escrow.primary_amount.to_be_bytes()));
+    payload.append(&Bytes::from_slice(env, &escrow.fee_amount.to_be_bytes()));
+    payload.append(&Bytes::from_slice(env, &escrow.expires_at.to_be_bytes()));
+    payload
+}
+
+pub fn release_remittance(env: &Env, id: u64, signature: BytesN<64>) -> Result<(), ContractError> {
+    let mut escrow: RemittanceEscrow = env.storage().persistent().get(&BridgeEscrowStorageKey::Remittance(id)).ok_or(ContractError::NotRegistered)?;
+    if escrow.released || escrow.refunded || env.ledger().timestamp() > escrow.expires_at { return Err(ContractError::InvalidProof); }
+    let config = load_config(env)?;
+    if config.processor == BytesN::from_array(env, &[0u8; 32]) {
+        return Err(ContractError::InvalidProof);
+    }
+    env.crypto().ed25519_verify(&config.processor, &remittance_payload(env, &escrow), &signature);
+    token::Client::new(env, &escrow.primary_token).transfer(&env.current_contract_address(), &escrow.recipient, &escrow.primary_amount);
+    if let Some(ref fee) = escrow.fee_token { token::Client::new(env, fee).transfer(&env.current_contract_address(), &escrow.recipient, &escrow.fee_amount); }
+    escrow.released = true;
+    env.storage().persistent().set(&BridgeEscrowStorageKey::Remittance(id), &escrow);
+    Ok(())
+}
+
+pub fn cancel_remittance(env: &Env, id: u64, sender: Address) -> Result<(), ContractError> {
+    let mut escrow: RemittanceEscrow = env.storage().persistent().get(&BridgeEscrowStorageKey::Remittance(id)).ok_or(ContractError::NotRegistered)?;
+    sender.require_auth();
+    if escrow.sender != sender || escrow.released || escrow.refunded || env.ledger().timestamp() <= escrow.expires_at { return Err(ContractError::InvalidProof); }
+    token::Client::new(env, &escrow.primary_token).transfer(&env.current_contract_address(), &sender, &escrow.primary_amount);
+    if let Some(ref fee) = escrow.fee_token { token::Client::new(env, fee).transfer(&env.current_contract_address(), &sender, &escrow.fee_amount); }
+    escrow.refunded = true;
+    env.storage().persistent().set(&BridgeEscrowStorageKey::Remittance(id), &escrow);
+    Ok(())
+}
+
+pub fn get_remittance(env: &Env, id: u64) -> Option<RemittanceEscrow> {
+    env.storage().persistent().get(&BridgeEscrowStorageKey::Remittance(id))
 }
 
 #[cfg(test)]
