@@ -48,13 +48,13 @@ pub const EV_PRICE_UPDATE: Symbol = symbol_short!("price_up");
 pub const EV_PRICE_FLOOR_SET: Symbol = symbol_short!("floor_set");
 
 /// Price oracle: a price floor was rolled back.
-pub const EV_PRICE_FLOOR_ROLL: Symbol = symbol_short!("floor_roll");
+pub const EV_PRICE_FLOOR_ROLL: Symbol = symbol_short!("flr_roll");
 
 /// Price oracle: price bounds were configured.
-pub const EV_PRICE_BOUNDS_SET: Symbol = symbol_short!("bounds_set");
+pub const EV_PRICE_BOUNDS_SET: Symbol = symbol_short!("bnds_set");
 
 /// Price oracle: price bounds were rolled back.
-pub const EV_PRICE_BOUNDS_ROLL: Symbol = symbol_short!("bounds_roll");
+pub const EV_PRICE_BOUNDS_ROLL: Symbol = symbol_short!("bnds_roll");
 
 /// Price oracle: max deviation percentage was updated.
 pub const EV_MAX_DEV_SET: Symbol = symbol_short!("dev_set");
@@ -167,29 +167,21 @@ pub fn emit_event<D: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
         return Err(ContractError::EventTopicLimitExceeded);
     }
 
-    // Build the topic tuple in a fixed-size array, then slice it.
-    //
-    // Soroban `publish` accepts any `IntoVal` for the topics argument.
-    // A 4-element array of `Symbol` values covers the maximum case.
-    let t0 = event_name;
-    let t1 = extra_topics.get(0).copied();
-    let t2 = extra_topics.get(1).copied();
-    let t3 = extra_topics.get(2).copied();
-
-    // Construct a Vec<Symbol> for the topics.
-    let mut topics: Vec<Symbol> = Vec::new(env);
-    topics.push_back(t0);
-    if let Some(s) = t1 {
-        topics.push_back(s);
+    match extra_topics.len() {
+        0 => env.events().publish((event_name,), data),
+        1 => env.events().publish((event_name, extra_topics[0].clone()), data),
+        2 => env.events().publish((event_name, extra_topics[0].clone(), extra_topics[1].clone()), data),
+        3 => env.events().publish(
+            (
+                event_name,
+                extra_topics[0].clone(),
+                extra_topics[1].clone(),
+                extra_topics[2].clone(),
+            ),
+            data,
+        ),
+        _ => return Err(ContractError::EventTopicLimitExceeded),
     }
-    if let Some(s) = t2 {
-        topics.push_back(s);
-    }
-    if let Some(s) = t3 {
-        topics.push_back(s);
-    }
-
-    env.events().publish(topics, data);
     Ok(())
 }
 
@@ -411,10 +403,11 @@ mod tests {
         ];
         for name in names.iter() {
             assert!(
-                seen.try_insert(*name, ()).is_ok(),
+                !seen.contains_key(name.clone()),
                 "duplicate event name: {:?}",
                 name
             );
+            seen.set(name.clone(), ());
         }
     }
 
