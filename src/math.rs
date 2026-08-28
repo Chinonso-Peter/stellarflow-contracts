@@ -8,12 +8,12 @@ use crate::ContractError;
 
 /// Compute the checked sum of a slice of `i128` values.
 ///
-/// Returns `ContractError::Overflow` if any intermediate addition
-/// exceeds `i128::MAX`.
+/// Returns `ContractError::MathOverflow` if any intermediate addition
+/// exceeds the `i128` bounds.
 pub fn compute_sum(values: &[i128]) -> Result<i128, ContractError> {
     values
         .iter()
-        .try_fold(0_i128, |acc, &v| acc.checked_add(v).ok_or(ContractError::Overflow))
+        .try_fold(0_i128, |acc, &v| acc.checked_add(v).ok_or(ContractError::MathOverflow))
 }
 
 /// Compute the integer arithmetic mean (floor) of a slice of `i128` values.
@@ -37,9 +37,11 @@ pub fn compute_mean(values: &[i128]) -> Result<i128, ContractError> {
 /// variance pass.  All intermediate operations use checked arithmetic.
 pub fn compute_sum_squared_deviations(values: &[i128], mean: i128) -> Result<i128, ContractError> {
     values.iter().try_fold(0_i128, |acc, &v| {
-        let dev = v - mean;
-        let sq = dev.checked_mul(dev).ok_or(ContractError::Overflow)?;
-        acc.checked_add(sq).ok_or(ContractError::Overflow)
+        let dev = v
+            .checked_sub(mean)
+            .ok_or(ContractError::MathOverflow)?;
+        let sq = dev.checked_mul(dev).ok_or(ContractError::MathOverflow)?;
+        acc.checked_add(sq).ok_or(ContractError::MathOverflow)
     })
 }
 
@@ -89,13 +91,78 @@ pub fn calculate_spread_bps(rate_a: i128, rate_b: i128) -> Result<i128, Contract
         return Err(ContractError::DivisionByZero);
     }
 
-    let delta = rate_a.saturating_sub(rate_b).abs();
+    let delta = rate_a
+        .checked_sub(rate_b)
+        .ok_or(ContractError::MathOverflow)?;
+
+    let delta = delta
+        .checked_abs()
+        .ok_or(ContractError::MathOverflow)?;
     let numerator = delta
         .checked_mul(10_000)
-        .ok_or(ContractError::Overflow)?;
+        .ok_or(ContractError::MathOverflow)?;
 
     // `rate_a` is confirmed non-zero, so this division is safe.
-    Ok(numerator / rate_a)
+    numerator
+        .checked_div(rate_a)
+        .ok_or(ContractError::DivisionByZero)
+}
+
+/// Multiplies two numbers and scales the result down by a fixed-point factor.
+///
+/// This function implements a rigid fixed-point arithmetic scaler that
+/// pre-multiplies intermediate values by a scale factor of 10^14 before
+/// performing division, then normalizes the result back down to the system's
+/// target 10^7 footprint.
+///
+/// # Arguments
+/// * `a` - The first number (multiplicand).
+/// * `b` - The second number (multiplier).
+/// * `scale_factor` - The denominator for scaling down, typically 10^7.
+///
+/// # Returns
+/// The scaled result, or `ContractError` on overflow or division by zero.
+pub fn multiply_and_scale_down(a: i128, b: i128, scale_factor: i128) -> Result<i128, ContractError> {
+    if scale_factor == 0 {
+        return Err(ContractError::DivisionByZero);
+    }
+
+    let product = a.checked_mul(b).ok_or(ContractError::MathOverflow)?;
+
+    // The division performs the scale-down.
+    product
+    .checked_div(scale_factor)
+    .ok_or(ContractError::DivisionByZero)
+}
+
+/// Compute the Cumulative Exponential Moving Average (CEMA).
+///
+/// Formula: `CEMA_new = (value * alpha) / scale_factor + (cema_prev * (scale_factor - alpha)) / scale_factor`
+///
+/// This implements intermediate fractional scaling rules to keep numbers
+/// comfortably within standard 128-bit primitive constraints while preserving
+/// precision and protecting against integer overflow using checked mathematical operators.
+pub fn compute_cema(
+    value: i128,
+    cema_prev: i128,
+    alpha: i128,
+    scale_factor: i128,
+) -> Result<i128, ContractError> {
+    if scale_factor == 0 {
+        return Err(ContractError::DivisionByZero);
+    }
+
+    // The complement of the scaling factor
+    let inv_alpha = scale_factor.checked_sub(alpha).ok_or(ContractError::MathOverflow)?;
+
+    // Intermediate scaling rules: scale down the individual terms *before* addition.
+    // This prevents the sum of products (value * alpha + cema_prev * inv_alpha)
+    // from exceeding the 128-bit limit when processing large transaction volumes.
+    let scaled_new_value = multiply_and_scale_down(value, alpha, scale_factor)?;
+    let scaled_prev_cema = multiply_and_scale_down(cema_prev, inv_alpha, scale_factor)?;
+
+    // Safely combine the scaled terms
+    scaled_new_value.checked_add(scaled_prev_cema).ok_or(ContractError::MathOverflow)
 }
 
 #[cfg(test)]
@@ -123,7 +190,7 @@ mod tests {
     fn test_sum_overflow() {
         assert_eq!(
             compute_sum(&[i128::MAX, 1]),
-            Err(ContractError::Overflow)
+            Err(ContractError::MathOverflow)
         );
     }
 
@@ -172,7 +239,7 @@ mod tests {
         let values = &[i128::MAX, 0];
         assert_eq!(
             compute_sum_squared_deviations(values, 0),
-            Err(ContractError::Overflow)
+            Err(ContractError::MathOverflow)
         );
     }
 
@@ -288,6 +355,86 @@ mod tests {
         let rate_b = i128::MAX; // Creates a large delta
         assert_eq!(
             calculate_spread_bps(rate_a, rate_b),
+            Err(ContractError::MathOverflow)
+        );
+    }
+
+    // --- multiply_and_scale_down ---
+
+    #[test]
+    fn test_multiply_and_scale_down_normal() {
+        // (2 * 10^7) * (3 * 10^7) / 10^7 = 6 * 10^7
+        let scale = 10_000_000;
+        assert_eq!(
+            multiply_and_scale_down(2 * scale, 3 * scale, scale),
+            Ok(6 * scale)
+        );
+    }
+
+    #[test]
+    fn test_multiply_and_scale_down_with_truncation() {
+        // 1.5 * 2.5 = 3.75. Scaled: (15 * 10^6) * (25 * 10^6) / 10^7 = 37.5 * 10^6 -> 37_500_000
+        let scale = 10_000_000;
+        assert_eq!(
+            multiply_and_scale_down(15_000_000, 2_500_000, scale),
+            Ok(3_750_000) // (1.5 * 0.25) * 10^7
+        );
+    }
+
+    #[test]
+    fn test_multiply_and_scale_down_division_by_zero() {
+        assert_eq!(
+            multiply_and_scale_down(100, 200, 0),
+            Err(ContractError::DivisionByZero)
+        );
+    }
+
+    #[test]
+    fn test_multiply_and_scale_down_overflow() {
+        assert_eq!(
+            multiply_and_scale_down(i128::MAX, 2, 10_000_000),
+            Err(ContractError::MathOverflow)
+        );
+    }
+
+    #[test]
+    fn test_multiply_and_scale_down_zero_value() {
+        assert_eq!(
+            multiply_and_scale_down(0, 12345, 10_000_000),
+            Ok(0)
+        );
+    }
+
+    // --- compute_cema ---
+
+    #[test]
+    fn test_compute_cema_normal() {
+        // scale = 10^7, alpha = 0.1 * 10^7 = 1_000_000
+        // value = 120, prev = 100
+        // result = 120 * 0.1 + 100 * 0.9 = 12 + 90 = 102
+        let scale = 10_000_000;
+        let alpha = 1_000_000;
+        assert_eq!(compute_cema(120, 100, alpha, scale), Ok(102));
+    }
+
+    #[test]
+    fn test_compute_cema_zero_alpha() {
+        let scale = 10_000_000;
+        assert_eq!(compute_cema(120, 100, 0, scale), Ok(100));
+    }
+
+    #[test]
+    fn test_compute_cema_full_alpha() {
+        let scale = 10_000_000;
+        assert_eq!(compute_cema(120, 100, scale, scale), Ok(120));
+    }
+
+    #[test]
+    fn test_compute_cema_overflow() {
+        let scale = 10_000_000;
+        // i128::MAX * alpha will overflow multiply_and_scale_down
+        assert_eq!(
+            compute_cema(i128::MAX, 100, 1_000_000, scale),
             Err(ContractError::Overflow)
         );
     }

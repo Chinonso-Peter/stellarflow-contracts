@@ -70,6 +70,11 @@ pub mod auth;
 pub mod consensus;
 pub mod staking_tiers;
 pub mod validation;
+pub mod staging;
+pub mod recovery;
+pub mod kernel;
+pub mod fees;
+pub mod temp_governance;
 use crate::validation::check_bond_capacity;
 pub mod governance;
 use crate::governance::{verify_staged_delay, StagedUpgrade, GovernanceProposal, ProposalStatus, MIN_LEDGER_DELAY};
@@ -133,6 +138,31 @@ pub enum ContractError {
     StaleTelemetryPayload = 33,
     /// A governance proposal has already been cancelled or executed.
     ProposalAlreadyCancelledOrExecuted = 34,
+    InsufficientReserveBalance = 35,
+    InsufficientVolume = 36,
+    InsufficientLiquidityDepth = 37,
+    BundleAssetLimitExceeded = 38,
+    IncompleteQuorum = 39,
+    EpochClosed = 40,
+    AdminChangePending = 41,
+    NoAdminChangePending = 42,
+    CosignerCannotBeProposer = 43,
+    InsufficientBondForPenalty = 44,
+    SlippageExceeded = 45,
+    AmountTooLow = 46,
+    InvalidVarianceConfig = 47,
+    MerkleTreeFull = 48,
+    ReentrancyDetected = 49,
+}
+
+impl ContractError {
+    pub const MathOverflow: Self = Self::Overflow;
+    pub const EmergencyRevocAlreadyActive: Self = Self::EmergencyRevocationAlreadyActive;
+    pub const AdminChangeTimelockNotSatis: Self = Self::UpgradeTimelockNotSatisfied;
+    pub const StagingNotAuthorized: Self = Self::Unauthorized;
+    pub const RecoveryNotAvailableYet: Self = Self::Unauthorized;
+    pub const NotRecoveryKey: Self = Self::Unauthorized;
+    pub const RecoveryKeyNotConfigured: Self = Self::NotInitialized;
 }
 
 // Contract state keys
@@ -172,6 +202,7 @@ pub struct RevocationProposal {
 pub struct ContractData {
     pub admin: Address,
     pub value: u64,
+    pub max_fee_ceiling: u64,
 }
 
 #[contracttype]
@@ -232,7 +263,7 @@ impl TimeLockedUpgradeContract {
             return Err(ContractError::AlreadyInitialized);
         }
         admin.require_auth();
-        let data = ContractData { admin: admin.clone(), value: 0 };
+        let data = ContractData { admin: admin.clone(), value: 0, max_fee_ceiling: 0 };
         env.storage().instance().set(&DATA_KEY, &data);
         // #439: write treasury once at deployment; never overwritten
         env.storage().instance().set(&TREASURY_KEY, &treasury);
