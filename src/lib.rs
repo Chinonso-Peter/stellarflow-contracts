@@ -92,6 +92,7 @@ pub mod temp_governance;
 pub mod security;
 pub mod upgrades;
 pub mod validation;
+pub mod veto;
 use crate::governance::{
     verify_staged_delay, StagedUpgrade, VotingBallot, open_ballot, cast_vote, close_ballot,
     verify_upgrade_quorum, GovernanceUpgradeProposal, GovernanceUpgradeProposedEvent,
@@ -177,9 +178,10 @@ pub enum ContractError {
     /// Reentrancy guard detected a reentrant call during execution.
     ReentrancyDetected = 58,
     MerkleTreeFull = 59,
-    NullifierAlreadyUsed = 49,
-    InvalidProof = 50,
-    ReentrancyDetected = 59,
+    NotSecurityCouncil = 60,
+    ProposalNotFound = 61,
+    ProposalNotVetoable = 62,
+    ProposalAlreadyVetoed = 63,
 }
 
 impl ContractError {
@@ -1151,6 +1153,73 @@ impl TimeLockedUpgradeContract {
 
     pub fn has_active_revocation_proposal(env: Env) -> bool {
         admin::has_active_emergency_revocation(&env)
+    }
+
+    // ── Governance Proposal Veto Engine (Issue #769) ────────────────────────────
+    // 
+    // Emergency veto control allowing the designated Security Council multi-sig
+    // address to cancel malicious or dangerous proposals during their timelock
+    // windows, providing a last-resort circuit-breaker mechanism.
+
+    /// Configure the Security Council address that has authority to veto proposals.
+    ///
+    /// Only the current admin may set the Security Council. Once configured,
+    /// this multi-sig address gains exclusive authority to veto any proposal.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - The caller (must be the contract admin)
+    /// * `council` - The Security Council multi-sig address
+    ///
+    /// # Errors
+    /// - [`ContractError::NotAdmin`] if the caller is not the contract admin
+    /// - [`ContractError::NotInitialized`] if the contract is not initialized
+    pub fn set_security_council(env: Env, caller: Address, council: Address) -> Result<(), ContractError> {
+        veto::set_security_council(&env, caller, council)
+    }
+
+    /// Retrieve the current Security Council address, if configured.
+    pub fn get_security_council(env: Env) -> Option<Address> {
+        veto::get_security_council(&env)
+    }
+
+    /// Veto an active proposal, instantly transitioning it to `Vetoed` state.
+    ///
+    /// Only the designated Security Council may invoke this function. Upon veto:
+    /// 1. The proposal is marked as vetoed
+    /// 2. Execution payload is invalidated
+    /// 3. Audit trail is recorded with reason hash
+    /// 4. `ProposalVetoed` event is emitted
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - The address attempting the veto (must be Security Council)
+    /// * `proposal_id` - The ID of the proposal to veto
+    /// * `reason` - Audit reason string (logged as hash for transparency)
+    ///
+    /// # Errors
+    /// - [`ContractError::NotSecurityCouncil`] if the caller is not the Security Council
+    /// - [`ContractError::ProposalNotFound`] if the proposal does not exist
+    /// - [`ContractError::ProposalAlreadyVetoed`] if the proposal is already vetoed
+    pub fn veto_proposal(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+        reason: soroban_sdk::String,
+    ) -> Result<(), ContractError> {
+        veto::veto_proposal(&env, caller, proposal_id, reason)
+    }
+
+    /// Retrieve the veto record for a proposal, if it has been vetoed.
+    ///
+    /// Returns None if the proposal has not been vetoed.
+    pub fn get_veto_record(env: Env, proposal_id: u64) -> Option<veto::ProposalVeto> {
+        veto::get_veto_record(&env, proposal_id)
+    }
+
+    /// Check if a proposal has been vetoed.
+    pub fn is_proposal_vetoed(env: Env, proposal_id: u64) -> bool {
+        veto::is_proposal_vetoed(&env, proposal_id)
     }
 
     // ── Multi-Tier Escrow Penalties (Issue #525) ──────────────────────────────

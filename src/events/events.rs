@@ -140,6 +140,9 @@ pub const EV_BALLOT_OPENED: Symbol = symbol_short!("ball_open");
 /// Governance: a revocation ballot was closed.
 pub const EV_BALLOT_CLOSED: Symbol = symbol_short!("ball_clos");
 
+/// Governance: a proposal was vetoed by the Security Council.
+pub const EV_PROPOSAL_VETOED: Symbol = symbol_short!("prop_vet");
+
 // ---------------------------------------------------------------------------
 // Core publishing function
 // ---------------------------------------------------------------------------
@@ -258,6 +261,52 @@ pub fn emit_simple4<D: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
         event_name,
         &[&entity_type, &entity_id, &status],
         data,
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Governance Veto Event
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ProposalVetoedEvent {
+    pub proposal_id: u64,
+    pub vetoed_by: soroban_sdk::Address,
+    pub vetoed_at: u64,
+    pub reason_hash: soroban_sdk::String,
+}
+
+/// Emit a ProposalVetoed event when the Security Council vetoes a proposal.
+///
+/// # Arguments
+/// * `env` - The contract environment
+/// * `proposal_id` - ID of the proposal that was vetoed
+/// * `vetoed_by` - Address of the Security Council that performed the veto
+/// * `vetoed_at` - Ledger timestamp of the veto
+/// * `reason` - Audit reason string (hashed in event for transparency)
+pub fn emit_proposal_vetoed(
+    env: &Env,
+    proposal_id: u64,
+    vetoed_by: soroban_sdk::Address,
+    vetoed_at: u64,
+    reason: soroban_sdk::String,
+) -> Result<(), ContractError> {
+    let proposal_id_sym = soroban_sdk::Symbol::new(env, &format!("prop_{}", proposal_id));
+    
+    let event = ProposalVetoedEvent {
+        proposal_id,
+        vetoed_by: vetoed_by.clone(),
+        vetoed_at,
+        reason_hash: reason,
+    };
+    
+    emit_simple3(
+        env,
+        EV_PROPOSAL_VETOED,
+        proposal_id_sym,
+        symbol_short!("vetoed"),
+        event,
     )
 }
 
@@ -413,6 +462,7 @@ mod tests {
             EV_UPGRADE_CANCELLED,
             EV_BALLOT_OPENED,
             EV_BALLOT_CLOSED,
+            EV_PROPOSAL_VETOED,
         ];
         for name in names.iter() {
             assert!(
