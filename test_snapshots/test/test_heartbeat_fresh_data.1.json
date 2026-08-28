@@ -433,7 +433,7 @@
               }
             ],
             "data": {
-              "symbol": "NGN"
+              "u32": 3897123275
             }
           }
         }
@@ -455,7 +455,9 @@
                 "symbol": "get_last_update_timestamp"
               }
             ],
-            "data": "void"
+            "data": {
+              "u64": 0
+            }
           }
         }
       },

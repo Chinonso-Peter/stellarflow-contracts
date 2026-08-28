@@ -167,15 +167,15 @@ fn test_timelock_countdown() {
     let remaining = client.get_upgrade_timelock_remaining().unwrap();
     assert_eq!(remaining, 5000);
 
-    env.ledger().set(LedgerInfo { sequence_number: 1001, ..env.ledger().get() });
+    env.ledger().set(LedgerInfo { sequence_number: 1000, ..env.ledger().get() });
 
     let remaining = client.get_upgrade_timelock_remaining().unwrap();
     assert_eq!(remaining, 4000);
 
-    env.ledger().set(LedgerInfo { sequence_number: 5001, ..env.ledger().get() });
+    env.ledger().set(LedgerInfo { sequence_number: 5000, ..env.ledger().get() });
 
     let remaining = client.get_upgrade_timelock_remaining().unwrap();
-    assert_eq!(remaining, 4999u32.saturating_sub(5001u32.saturating_sub(1)));
+    assert_eq!(remaining, 0u32);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -194,8 +194,6 @@ fn test_heartbeat_fresh_data() {
     client.initialize(&admin, &treasury);
 
     let asset: AssetId = 3897123275; // NGN
-    let asset_sym = symbol_short!("NGN");
-
     // Update heartbeat
     client.update_heartbeat(&asset, &admin);
 
@@ -203,7 +201,7 @@ fn test_heartbeat_fresh_data() {
     assert!(client.is_data_fresh(&asset));
 
     // Verify timestamp was recorded
-    let ts = client.get_last_update_timestamp(&asset_sym);
+    let ts = client.get_last_update_timestamp(&asset);
     assert!(ts.is_some());
     assert_eq!(ts.unwrap(), env.ledger().timestamp());
 }
@@ -247,7 +245,7 @@ fn test_heartbeat_never_updated() {
 
     // No heartbeat recorded → should be stale
     assert!(!client.is_data_fresh(&asset));
-    assert!(client.get_last_update_timestamp(&symbol_short!("GHS")).is_none());
+    assert!(client.get_last_update_timestamp(&asset).is_none());
 }
 
 #[test]
@@ -710,8 +708,6 @@ fn test_set_value_updates_heartbeat() {
     client.initialize(&admin, &treasury);
 
     let value_asset: AssetId = 1; // VALUE
-    let value_sym = symbol_short!("VALUE");
-
     // Before set_value, no heartbeat exists for "VALUE"
     assert!(!client.is_data_fresh(&value_asset));
 
@@ -721,7 +717,7 @@ fn test_set_value_updates_heartbeat() {
 
     // Now the "VALUE" asset should have a fresh heartbeat
     assert!(client.is_data_fresh(&value_asset));
-    assert!(client.get_last_update_timestamp(&value_sym).is_some());
+    assert!(client.get_last_update_timestamp(&value_asset).is_some());
 
     // Fast-forward past interval → data goes stale
     advance_ledger_timestamp(&env, DEFAULT_HEARTBEAT_INTERVAL + 1);
@@ -992,19 +988,19 @@ fn test_revoked_admin_cannot_propose_or_execute_upgrade() {
     let contract_id = env.register_contract(None, TimeLockedUpgradeContract);
     let client = TimeLockedUpgradeContractClient::new(&env, &contract_id);
 
-    // Use a 2-of-2 setup: admin + signer_a.
+    // Use a 3-of-3 setup: admin + signer_a + signer_b.
     let admin = soroban_sdk::Address::generate(&env);
     let signer_a = soroban_sdk::Address::generate(&env);
+    let signer_b = soroban_sdk::Address::generate(&env);
     let replacement = soroban_sdk::Address::generate(&env);
 
     client.initialize(&admin, &soroban_sdk::Address::generate(&env));
     client.register_signer(&signer_a, &admin);
+    client.register_signer(&signer_b, &admin);
 
-    // Revoke the admin (signer_a opens the proposal against the admin).
+    // Revoke the admin (signer_a opens, signer_b confirms = threshold 2 of 2).
     client.propose_emergency_revocation(&signer_a, &admin, &replacement);
-    // signer_a's proposal opening counts as vote #1.
-    // With only 1 registered signer, threshold = 1/2+1 = 1, already reached.
-    // Admin is now revoked and replaced.
+    client.vote_emergency_revocation(&signer_b, &u64::MAX);
 
     assert!(client.is_revoked(&admin));
 

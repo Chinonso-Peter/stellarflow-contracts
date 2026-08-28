@@ -319,6 +319,7 @@ impl TimeLockedUpgradeContract {
 
     pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>, proposer: Address, nonce: u64, salt: Bytes, salt_signature: BytesN<32>, sig_expires_at: u64) -> Result<(), ContractError> {
         if env.ledger().timestamp() > sig_expires_at { return Err(ContractError::SignatureExpired); }
+        admin::assert_not_revoked(&env, &proposer)?;
         let data = Self::get_data(env.clone())?;
         if data.admin != proposer { return Err(ContractError::NotAdmin); }
         proposer.require_auth();
@@ -384,8 +385,8 @@ impl TimeLockedUpgradeContract {
         get_nonce(&env, &coordinator)
     }
 
-    pub fn get_last_update_timestamp(env: Env, asset: Symbol) -> Option<u64> {
-        let timestamps: Map<Symbol, u64> = env.storage().temporary().get(&HEARTBEAT_KEY).unwrap_or_else(|| Map::new(&env));
+    pub fn get_last_update_timestamp(env: Env, asset: AssetId) -> Option<u64> {
+        let timestamps: Map<AssetId, u64> = env.storage().temporary().get(&HEARTBEAT_KEY).unwrap_or_else(|| Map::new(&env));
         timestamps.get(asset)
     }
 
@@ -684,6 +685,7 @@ impl TimeLockedUpgradeContract {
     }
 
     pub fn register_signer(env: Env, signer: Address, caller: Address) -> Result<(), ContractError> {
+        admin::assert_not_revoked(&env, &caller)?;
         let data = Self::get_data(env.clone())?;
         if data.admin != caller { return Err(ContractError::NotAdmin); }
         caller.require_auth();

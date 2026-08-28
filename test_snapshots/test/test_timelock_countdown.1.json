@@ -61,11 +61,12 @@
       ]
     ],
     [],
+    [],
     []
   ],
   "ledger": {
     "protocol_version": 20,
-    "sequence_number": 1001,
+    "sequence_number": 5000,
     "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
@@ -523,7 +524,54 @@
               }
             ],
             "data": {
-              "u32": 3999
+              "u32": 4000
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
+              },
+              {
+                "symbol": "get_upgrade_timelock_remaining"
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "get_upgrade_timelock_remaining"
+              }
+            ],
+            "data": {
+              "u32": 0
             }
           }
         }
