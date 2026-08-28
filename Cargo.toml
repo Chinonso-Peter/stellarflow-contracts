@@ -15,6 +15,7 @@ members = [
     "contracts/reward-splitter",
     "contracts/gas-tank",
     "contracts/stop-loss-trigger",
+    "contracts/shielded-remittance-escrow",
     "tests/benchmarks",
     "tests/fuzz",
 ]
