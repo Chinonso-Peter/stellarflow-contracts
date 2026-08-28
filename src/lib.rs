@@ -1341,6 +1341,27 @@ impl TimeLockedUpgradeContract {
         vaults::autocompound::get_share_balance(&env, holder)
     }
 
+    /// Evaluate a vault liquidation against verified TWAP prices from the
+    /// oracle. Liquidation is allowed below 110% collateralization and
+    /// allocates 5% of confiscated collateral to the liquidator.
+    pub fn vault_liquidation_quote(
+        env: Env,
+        oracle: Address,
+        collateral_asset: Symbol,
+        debt_asset: Symbol,
+        position: vaults::liquidation::VaultPosition,
+        purchase_collateral: u128,
+    ) -> Result<vaults::liquidation::LiquidationResult, ContractError> {
+        vaults::liquidation::liquidate_at_twap(
+            &env,
+            &oracle,
+            &collateral_asset,
+            &debt_asset,
+            &position,
+            purchase_collateral,
+        )
+    }
+
     pub fn vault_config(env: Env) -> Option<vaults::autocompound::VaultConfig> {
         vaults::autocompound::get_config(&env)
     }
