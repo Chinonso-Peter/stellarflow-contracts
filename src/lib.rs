@@ -164,26 +164,15 @@ pub enum ContractError {
     InsufficientBondForPenalty = 46,
     SlippageExceeded = 47,
     AmountTooLow = 48,
-    NullifierAlreadyUsed = 48,
     InvalidProof = 49,
-    BridgeAssetNotRegistered = 50,
-    BridgeInvalidMaxSupply = 51,
-    BridgeAssetAlreadyRegistered = 52,
-    BridgeInvalidAmount = 53,
-    BridgeNotController = 54,
-    BridgeSupplyCapExceeded = 55,
-    BridgeInsufficientBalance = 56,
-    BridgeEscrowNotConfigured = 57,
     /// Reentrancy guard detected a reentrant call during execution.
     ReentrancyDetected = 58,
     MerkleTreeFull = 59,
-    NullifierAlreadyUsed = 49,
-    InvalidProof = 50,
-    ReentrancyDetected = 59,
 }
 
 impl ContractError {
     pub const MathOverflow: Self = Self::Overflow;
+    pub const NullifierAlreadyUsed: Self = Self::AlreadyRegistered;
     pub const BridgeAssetNotRegistered: Self = Self::NotRegistered;
     pub const BridgeInvalidMaxSupply: Self = Self::Overflow;
     pub const BridgeAssetAlreadyRegistered: Self = Self::AlreadyRegistered;
@@ -233,6 +222,11 @@ impl ContractError {
     pub const RoleExpirationInPast: Self = Self::UpgradeTimelockNotSatisfied;
     pub const RoleNotFound: Self = Self::NotRegistered;
     pub const RoleExpiredOrMissing: Self = Self::Unauthorized;
+    pub const HarvestNothingToCompound: Self = Self::AmountTooLow;
+    pub const HarvestInvalidMinOut: Self = Self::AmountTooLow;
+    pub const HarvestSwapFailed: Self = Self::RouteExecutionFailed;
+    pub const HarvestSlippageExceeded: Self = Self::SlippageExceeded;
+    pub const HarvestInvalidPath: Self = Self::InconsistentRouteAssets;
 }
 
 // Contract state keys
@@ -635,9 +629,10 @@ impl TimeLockedUpgradeContract {
         get_nonce(&env, &coordinator)
     }
 
-    pub fn get_last_update_timestamp(env: Env, asset: Symbol) -> Option<u64> {
-        let asset_id = symbol_to_asset_id(&asset);
-        let heartbeat_key = HeartbeatKey(asset_id);
+    /// Takes an `AssetId` like its siblings `update_heartbeat` and
+    /// `is_data_fresh`; callers hash a `Symbol` with `symbol_to_asset_id`.
+    pub fn get_last_update_timestamp(env: Env, asset: AssetId) -> Option<u64> {
+        let heartbeat_key = HeartbeatKey(asset);
         env.storage().temporary().get(&heartbeat_key)
     }
 
@@ -714,6 +709,16 @@ impl TimeLockedUpgradeContract {
 
     pub fn get_corridor_fee_pool(env: Env, asset: AssetId) -> fees::CorridorFeePool {
         crate::fees::get_corridor_fee_pool(env, asset)
+    }
+
+    pub fn add_corridor_fees(
+        env: Env,
+        admin: Address,
+        asset: AssetId,
+        collected: u64,
+        variable_fee: u64,
+    ) -> Result<fees::CorridorFeePool, ContractError> {
+        crate::fees::add_corridor_fees(env, admin, asset, collected, variable_fee)
     }
 
     pub fn record_lp_fee(
@@ -1401,6 +1406,31 @@ impl TimeLockedUpgradeContract {
         user: Address,
     ) -> Result<i128, ContractError> {
         vaults::lp_farming::pending_rewards(&env, user)
+    }
+
+    pub fn yield_farming_share_balance(env: Env, user: Address) -> i128 {
+        vaults::lp_farming::get_share_balance(&env, user)
+    }
+
+    // ── Yield farm harvest-compound auto-router (Issue #798) ─────────────────
+
+    /// Claim accrued farm rewards, swap them to LP through `router` along
+    /// `path`, and re-stake the proceeds — atomically. `min_lp_out` is the
+    /// caller's slippage floor, enforced against the vault's measured LP
+    /// balance delta rather than anything the router reports.
+    ///
+    /// The reentrancy guard here is the *only* one on this path: it must hold
+    /// across the untrusted `router` call, and the `lp_farming` helpers this
+    /// delegates to take no guard of their own.
+    pub fn harvest_and_compound(
+        env: Env,
+        user: Address,
+        router: Address,
+        path: Vec<Address>,
+        min_lp_out: i128,
+    ) -> Result<vaults::harvest_compound::HarvestCompoundResult, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::harvest_compound::harvest_and_compound(&env, user, router, path, min_lp_out)
     }
 
     // ── On-chain limit order book (Issue #701) ───────────────────────────────

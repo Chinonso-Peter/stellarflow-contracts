@@ -416,10 +416,11 @@ mod tests {
         ];
         for name in names.iter() {
             assert!(
-                seen.try_insert(*name, ()).is_ok(),
+                !seen.contains_key(name.clone()),
                 "duplicate event name: {:?}",
                 name
             );
+            seen.set(name.clone(), ());
         }
     }
 
