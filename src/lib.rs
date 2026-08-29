@@ -85,12 +85,17 @@ pub mod staging;
 pub mod staking_tiers;
 pub mod router;
 pub mod settlement;
+pub mod state_verification;
 pub mod storage;
 pub mod zk;
 pub mod temp_governance;
 pub mod security;
 pub mod upgrades;
 pub mod validation;
+pub use state_verification::{
+    assert_contract_state_sanity, verify_contract_state, verify_storage_ttl_bumps,
+    verify_zero_loss_accounting,
+};
 use crate::governance::{
     verify_staged_delay, StagedUpgrade, VotingBallot, open_ballot, cast_vote, close_ballot,
     verify_upgrade_quorum, GovernanceUpgradeProposal, GovernanceUpgradeProposedEvent,
@@ -446,6 +451,18 @@ impl TimeLockedUpgradeContract {
 
     pub fn get_data(env: Env) -> Result<ContractData, ContractError> {
         Self::load_data(&env)
+    }
+
+    pub fn verify_storage_ttl(env: Env) -> Result<(), ContractError> {
+        verify_storage_ttl_bumps(&env)
+    }
+
+    pub fn verify_zero_loss(env: Env) -> Result<(), ContractError> {
+        verify_zero_loss_accounting(&env)
+    }
+
+    pub fn verify_contract_state(env: Env) -> Result<(), ContractError> {
+        verify_contract_state(&env)
     }
 
     pub fn propose_upgrade(
