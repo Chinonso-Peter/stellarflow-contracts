@@ -30,13 +30,18 @@ pub struct LimitOrder {
     pub id: u64,
     pub maker: Address,
     pub pair: AssetPair,
-    pub side: OrderSide,
+    pub sell_asset: Address,
+    pub buy_asset: Address,
     /// Price in `buy_asset` per unit of `sell_asset`, fixed-point at `PRICE_SCALE`.
     pub price_tick: i128,
+    /// Remaining sell-asset collateral locked by this order.
+    pub amount: i128,
     pub original_amount: i128,
     pub remaining_amount: i128,
     pub filled_amount: i128,
     pub created_at_ledger: u32,
+    /// Expiry ledger sequence; zero means the order does not expire.
+    pub expiry: u32,
     pub active: bool,
 }
 
@@ -76,8 +81,10 @@ pub struct SettlementResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OrderStorageKey {
     NextOrderId,
-    /// Order struct keyed by its unique id.
-    Order(u64),
+    /// Index from the public order id to its canonical composite storage key.
+    OrderIndex(u64),
+    /// Order struct keyed by `(AssetPair, PriceTick, OrderID)`.
+    Order(AssetPair, i128, u64),
     /// Resting-order index bucket keyed by `(AssetPair, PriceTick)`, listing
     /// the ids of every order posted at that exact tick for that pair — this
     /// is the `(AssetPair, PriceTick, OrderID)` addressing scheme fill
@@ -142,17 +149,35 @@ fn protocol_fee(amount: i128) -> Result<i128, ContractError> {
 }
 
 fn load_order(env: &Env, order_id: u64) -> Result<LimitOrder, ContractError> {
+    let index: (AssetPair, i128) = env
+        .storage()
+        .persistent()
+        .get(&OrderStorageKey::OrderIndex(order_id))
+        .ok_or(ContractError::OrderNotFound)?;
     env.storage()
         .persistent()
-        .get(&OrderStorageKey::Order(order_id))
+        .get(&OrderStorageKey::Order(index.0, index.1, order_id))
         .ok_or(ContractError::OrderNotFound)
 }
 
 fn save_order(env: &Env, order: &LimitOrder) {
-    let key = OrderStorageKey::Order(order.id);
+    let key = OrderStorageKey::Order(
+        order.pair.clone(),
+        order.price_tick,
+        order.id,
+    );
     env.storage().persistent().set(&key, order);
     env.storage().persistent().extend_ttl(
         &key,
+        crate::storage::PERSISTENT_TTL_THRESHOLD,
+        crate::storage::PERSISTENT_TTL_THRESHOLD,
+    );
+    let index_key = OrderStorageKey::OrderIndex(order.id);
+    env.storage()
+        .persistent()
+        .set(&index_key, &(order.pair.clone(), order.price_tick));
+    env.storage().persistent().extend_ttl(
+        &index_key,
         crate::storage::PERSISTENT_TTL_THRESHOLD,
         crate::storage::PERSISTENT_TTL_THRESHOLD,
     );
@@ -194,6 +219,18 @@ pub fn place_order(
     price_tick: i128,
     sell_amount: i128,
 ) -> Result<LimitOrder, ContractError> {
+    place_order_with_expiry(env, maker, pair, price_tick, sell_amount, 0)
+}
+
+/// Post a limit order with an optional ledger-sequence expiry.
+pub fn place_order_with_expiry(
+    env: &Env,
+    maker: Address,
+    pair: AssetPair,
+    price_tick: i128,
+    sell_amount: i128,
+    expiry: u32,
+) -> Result<LimitOrder, ContractError> {
     if sell_amount <= 0 {
         return Err(ContractError::OrderZeroAmount);
     }
@@ -209,12 +246,15 @@ pub fn place_order(
         id: next_order_id(env),
         maker,
         pair: pair.clone(),
-        side: OrderSide::Sell,
+        sell_asset: pair.sell_asset.clone(),
+        buy_asset: pair.buy_asset.clone(),
         price_tick,
+        amount: sell_amount,
         original_amount: sell_amount,
         remaining_amount: sell_amount,
         filled_amount: 0,
         created_at_ledger: env.ledger().sequence(),
+        expiry,
         active: true,
     };
 
@@ -278,8 +318,8 @@ pub fn fill_order(env: &Env, filler: Address, order_id: u64, fill_amount: i128) 
     if !order.active {
         return Err(ContractError::OrderAlreadyClosed);
     }
-    if order.side != OrderSide::Sell {
-        return Err(ContractError::OrderSideMismatch);
+    if order.expiry != 0 && env.ledger().sequence() > order.expiry {
+        return Err(ContractError::OrderAlreadyClosed);
     }
     if fill_amount > order.remaining_amount {
         return Err(ContractError::OrderInsufficientRemaining);
@@ -301,6 +341,7 @@ pub fn fill_order(env: &Env, filler: Address, order_id: u64, fill_amount: i128) 
         .remaining_amount
         .checked_sub(fill_amount)
         .ok_or(ContractError::MathOverflow)?;
+    order.amount = order.remaining_amount;
     order.filled_amount = order
         .filled_amount
         .checked_add(fill_amount)
@@ -447,6 +488,7 @@ pub fn cancel_order(env: &Env, maker: Address, order_id: u64) -> Result<i128, Co
         order.remaining_amount
     };
     order.remaining_amount = 0;
+    order.amount = 0;
     order.active = false;
     bucket_remove(env, &order.pair, order.price_tick, order.id);
     save_order(env, &order);
@@ -483,7 +525,7 @@ pub fn withdraw_balance(env: &Env, owner: Address, asset: Address, amount: i128)
 }
 
 pub fn get_order(env: &Env, order_id: u64) -> Option<LimitOrder> {
-    env.storage().persistent().get(&OrderStorageKey::Order(order_id))
+    load_order(env, order_id).ok()
 }
 
 /// List the ids of every order currently resting at `(pair, price_tick)`.
