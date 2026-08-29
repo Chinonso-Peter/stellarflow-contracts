@@ -211,6 +211,30 @@ pub fn validate_topics(topic_count: u32) -> Result<(), ContractError> {
     }
 }
 
+/// Event payload emitted when flash loan service fees are distributed.
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlashLoanFeesDistributedEvent {
+    pub asset: crate::AssetId,
+    pub total_amount: u64,
+    pub lp_share: u64,
+    pub treasury_share: u64,
+    pub lp_reward_pool: soroban_sdk::Address,
+    pub treasury: soroban_sdk::Address,
+}
+
+pub fn publish_flash_fees_distributed(
+    env: &Env,
+    event: FlashLoanFeesDistributedEvent,
+) {
+    let _ = emit_simple2(
+        env,
+        EV_FLASH_FEES_DISTRIBUTED,
+        Symbol::new(env, "flash_fees"),
+        event,
+    );
+}
+
 /// Return the number of topics a well-formed event would have given
 /// the number of extra topics provided (does not publish).
 pub fn topic_count(extra_topics: u32) -> u32 {
