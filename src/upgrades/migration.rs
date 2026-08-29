@@ -89,7 +89,7 @@ fn migrate_from_version(env: &Env, from_version: u32) -> Result<(), ContractErro
 }
 
 pub fn migrate_feed_metrics(env: &Env, asset: u32) -> AssetFeedMetrics {
-    let metrics_key = crate::storage::AssetMetricsKey(asset.into());
+    let metrics_key = crate::StakingStorageKey::AssetMetrics(asset);
     if let Some(existing) = env.storage().persistent().get(&metrics_key) {
         return existing;
     }
