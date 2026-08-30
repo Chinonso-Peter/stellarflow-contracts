@@ -170,33 +170,20 @@ pub fn emit_event<D: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
         return Err(ContractError::EventTopicLimitExceeded);
     }
 
-    // Build the topic tuple in a fixed-size array, then slice it.
-    //
-    // Soroban `publish` accepts any `IntoVal` for the topics argument.
-    // A 4-element array of `Symbol` values covers the maximum case.
-    let t0 = event_name;
-    let t1 = extra_topics.get(0).copied();
-    let t2 = extra_topics.get(1).copied();
-    let t3 = extra_topics.get(2).copied();
-
-    let mut topics: Vec<Symbol> = Vec::new(env);
-    topics.push_back(t0);
-    if let Some(s) = t1 {
-        topics.push_back((*s).clone());
-    }
-    if let Some(s) = t2 {
-        topics.push_back((*s).clone());
-    }
-    if let Some(s) = t3 {
-        topics.push_back((*s).clone());
-    }
-
-    match topics.len() {
-        1 => env.events().publish((topics.get(0).unwrap(),), data),
-        2 => env.events().publish((topics.get(0).unwrap(), topics.get(1).unwrap()), data),
-        3 => env.events().publish((topics.get(0).unwrap(), topics.get(1).unwrap(), topics.get(2).unwrap()), data),
-        4 => env.events().publish((topics.get(0).unwrap(), topics.get(1).unwrap(), topics.get(2).unwrap(), topics.get(3).unwrap()), data),
-        _ => {}
+    match extra_topics.len() {
+        0 => env.events().publish((event_name,), data),
+        1 => env.events().publish((event_name, extra_topics[0].clone()), data),
+        2 => env.events().publish((event_name, extra_topics[0].clone(), extra_topics[1].clone()), data),
+        3 => env.events().publish(
+            (
+                event_name,
+                extra_topics[0].clone(),
+                extra_topics[1].clone(),
+                extra_topics[2].clone(),
+            ),
+            data,
+        ),
+        _ => return Err(ContractError::EventTopicLimitExceeded),
     }
     Ok(())
 }
@@ -490,10 +477,11 @@ mod tests {
         ];
         for name in names.iter() {
             assert!(
-                seen.try_insert(*name, ()).is_ok(),
+                !seen.contains_key(name.clone()),
                 "duplicate event name: {:?}",
                 name
             );
+            seen.set(name.clone(), ());
         }
     }
 

@@ -126,7 +126,7 @@ pub const PERSISTENT_TTL_THRESHOLD: u32 = 535_680;
 pub fn extend_persistent_ttl<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
     env.storage()
         .persistent()
-        .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_THRESHOLD);
+        .extend_ttl(key, RENT_THRESHOLD, RENT_EXTEND_TO);
 }
 
 pub fn get_node_profiles(env: &Env) -> Map<Address, NodeProfile> {

@@ -153,11 +153,11 @@ fn test_schema_version_migration_converts_legacy_state() {
     assert_eq!(data.admin, admin);
     assert_eq!(data.value, 0);
 
-    assert!(env.storage().persistent().has(&crate::storage::NodeProfileKey(admin.clone())));
-    assert!(env.storage().instance().has(&crate::storage::SignerKey(admin.clone())));
-    assert!(env.storage().instance().has(&crate::storage::StakeKey(admin.clone())));
-    assert_eq!(env.storage().instance().get(&crate::TOTAL_STAKED_KEY).unwrap(), 123u64);
-    assert!(env.storage().temporary().has(&crate::storage::HeartbeatKey(0u32)));
+    assert!(env.storage().persistent().has(&crate::storage::NodeProfileKey::ProfileByNode(admin.clone())));
+    assert!(env.storage().instance().has(&crate::storage::SignerKey::SignerByAddress(admin.clone())));
+    assert!(env.storage().instance().has(&crate::storage::StakeKey::StakeByNode(admin.clone())));
+    assert_eq!(env.storage().instance().get::<_, u64>(&crate::TOTAL_STAKED_KEY).unwrap(), 123u64);
+    assert!(env.storage().temporary().has(&crate::storage::HeartbeatKey::HeartbeatByAsset(0u32)));
 }
 
 #[test]
