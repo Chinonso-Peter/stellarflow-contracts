@@ -18,6 +18,7 @@ members = [
     "contracts/gas-tank",
     "contracts/relayer-allowance",
     "contracts/stop-loss-trigger",
+    "contracts/shielded-remittance-escrow",
     "tests/benchmarks",
     "tests/fuzz",
 ]
