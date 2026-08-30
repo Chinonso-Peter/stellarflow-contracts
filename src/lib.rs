@@ -68,6 +68,7 @@ pub mod amm;
 pub mod admin;
 pub mod auth;
 pub mod bridge;
+pub mod escrow;
 pub mod config;
 pub mod kernel;
 pub mod orders;
@@ -163,6 +164,19 @@ pub enum ContractError {
     InsufficientBondForPenalty = 46,
     SlippageExceeded = 47,
     AmountTooLow = 48,
+    NullifierAlreadyUsed = 48,
+    InvalidProof = 49,
+    BridgeAssetNotRegistered = 50,
+    BridgeInvalidMaxSupply = 51,
+    BridgeAssetAlreadyRegistered = 52,
+    BridgeInvalidAmount = 53,
+    BridgeNotController = 54,
+    BridgeSupplyCapExceeded = 55,
+    BridgeInsufficientBalance = 56,
+    BridgeEscrowNotConfigured = 57,
+    /// Reentrancy guard detected a reentrant call during execution.
+    ReentrancyDetected = 58,
+    MerkleTreeFull = 59,
     NullifierAlreadyUsed = 49,
     InvalidProof = 50,
     ReentrancyDetected = 59,
@@ -239,7 +253,8 @@ const PLATFORM_CAPITAL_KEY: Symbol = symbol_short!("CAPITAL");
 pub(crate) const CONSENSUS_CACHE_KEY: Symbol = symbol_short!("CACHE");
 const RELAYER_TTL_THRESHOLD: u32 = 5_000;
 const INSTANCE_TTL_EXTEND: u32 = 100_000;
-const TREASURY_KEY: Symbol = symbol_short!("TREASURY");
+pub(crate) const TREASURY_KEY: Symbol = symbol_short!("TREASURY");
+pub(crate) const LP_REWARD_POOL_KEY: Symbol = symbol_short!("LPREWARD");
 const SEQUENCE_COUNTER_KEY: Symbol = symbol_short!("SEQCTR");
 const REVOCATION_KEY: Symbol = symbol_short!("REVOKE");
 const RECOVERY_KEY: Symbol = symbol_short!("RKEY");
@@ -701,6 +716,86 @@ impl TimeLockedUpgradeContract {
 
     pub fn get_corridor_fee_pool(env: Env, asset: AssetId) -> fees::CorridorFeePool {
         crate::fees::get_corridor_fee_pool(env, asset)
+    }
+
+    pub fn record_lp_fee(
+        env: Env,
+        admin: Address,
+        asset: AssetId,
+        fee_amount: u64,
+    ) -> Result<settlement::fees::LiquidityPool, ContractError> {
+        settlement::fees::record_fee(&env, admin, asset, fee_amount)
+    }
+
+    pub fn add_lp_liquidity(
+        env: Env,
+        provider: Address,
+        asset: AssetId,
+        reserve_a: u128,
+        reserve_b: u128,
+        lp_units: u64,
+    ) -> Result<settlement::fees::LiquidityPosition, ContractError> {
+        settlement::fees::add_liquidity(
+            &env,
+            provider,
+            asset,
+            reserve_a,
+            reserve_b,
+            lp_units,
+        )
+    }
+
+    pub fn redeem_lp_liquidity(
+        env: Env,
+        provider: Address,
+        asset: AssetId,
+        lp_units: u64,
+    ) -> Result<settlement::fees::RedemptionResult, ContractError> {
+        settlement::fees::redeem_liquidity(&env, provider, asset, lp_units)
+    }
+
+    pub fn get_lp_pool(env: Env, asset: AssetId) -> settlement::fees::LiquidityPool {
+        settlement::fees::get_pool(&env, asset)
+    }
+
+    pub fn get_lp_position(
+        env: Env,
+        asset: AssetId,
+        provider: Address,
+    ) -> Option<settlement::fees::LiquidityPosition> {
+        settlement::fees::get_position(&env, asset, provider)
+    }
+
+    /// Record flash loan fee revenue for an asset.
+    pub fn record_flash_fee(
+        env: Env,
+        asset: AssetId,
+        fee_amount: u64,
+    ) -> Result<u64, ContractError> {
+        fees::record_flash_fee(&env, asset, fee_amount)
+    }
+
+    /// Query the flash loan fee pool status for an asset.
+    pub fn get_flash_fee_pool(env: Env, asset: AssetId) -> fees::FlashLoanFeePool {
+        fees::get_flash_fee_pool(&env, asset)
+    }
+
+    /// Set the LP reward pool destination address for flash fee distributions.
+    pub fn set_lp_reward_pool(
+        env: Env,
+        admin: Address,
+        lp_reward_pool: Address,
+    ) -> Result<(), ContractError> {
+        fees::set_lp_reward_pool(&env, &admin, lp_reward_pool)
+    }
+
+    /// Distribute accumulated flash loan service fees (50% to LP reward pool and 50% to DAO treasury).
+    pub fn distribute_flash_fees(
+        env: Env,
+        caller: Address,
+        asset: AssetId,
+    ) -> Result<(u64, u64), ContractError> {
+        fees::distribute_flash_fees(&env, &caller, asset)
     }
 
     /// Get the current dynamic trading fee for an asset (in basis points)
@@ -1261,6 +1356,13 @@ impl TimeLockedUpgradeContract {
         vaults::autocompound::harvest(&env, keeper, yield_amount)
     }
 
+    pub fn vault_flash_loan(
+        env: Env, borrower: Address, amount: i128,
+    ) -> Result<i128, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::autocompound::flash_loan(&env, borrower, amount)
+    }
+
     pub fn vault_total_assets(env: Env) -> i128 {
         vaults::autocompound::get_total_assets(&env)
     }
@@ -1273,8 +1375,87 @@ impl TimeLockedUpgradeContract {
         vaults::autocompound::get_share_balance(&env, holder)
     }
 
+    /// Evaluate a vault liquidation against verified TWAP prices from the
+    /// oracle. Liquidation is allowed below 110% collateralization and
+    /// allocates 5% of confiscated collateral to the liquidator.
+    pub fn vault_liquidation_quote(
+        env: Env,
+        oracle: Address,
+        collateral_asset: Symbol,
+        debt_asset: Symbol,
+        position: vaults::liquidation::VaultPosition,
+        purchase_collateral: u128,
+    ) -> Result<vaults::liquidation::LiquidationResult, ContractError> {
+        vaults::liquidation::liquidate_at_twap(
+            &env,
+            &oracle,
+            &collateral_asset,
+            &debt_asset,
+            &position,
+            purchase_collateral,
+        )
+    }
+
     pub fn vault_config(env: Env) -> Option<vaults::autocompound::VaultConfig> {
         vaults::autocompound::get_config(&env)
+    }
+
+    pub fn init_yield_farming(
+        env: Env,
+        admin: Address,
+        lp_token: Address,
+        reward_token: Address,
+        emission_per_ledger: i128,
+    ) -> Result<vaults::lp_farming::FarmingConfig, ContractError> {
+        vaults::lp_farming::initialize(
+            &env,
+            admin,
+            lp_token,
+            reward_token,
+            emission_per_ledger,
+        )
+    }
+
+    pub fn fund_yield_rewards(
+        env: Env,
+        funder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        vaults::lp_farming::fund_rewards(&env, funder, amount)
+    }
+
+    pub fn stake_lp(env: Env, user: Address, amount: i128) -> Result<i128, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::lp_farming::stake(&env, user, amount)
+    }
+
+    pub fn claim_rewards(env: Env, user: Address) -> Result<i128, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::lp_farming::claim_rewards(&env, user)
+    }
+
+    pub fn exit_yield_farming(
+        env: Env,
+        user: Address,
+    ) -> Result<(i128, i128), ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::lp_farming::exit(&env, user)
+    }
+
+    pub fn set_emission_multiplier(
+        env: Env,
+        governance: Address,
+        multiplier: u32,
+    ) -> Result<vaults::lp_farming::FarmingConfig, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::lp_farming::set_emission_multiplier(&env, governance, multiplier)
+    }
+
+    pub fn pending_yield_rewards(
+        env: Env,
+        user: Address,
+    ) -> Result<i128, ContractError> {
+        vaults::lp_farming::pending_rewards(&env, user)
     }
 
     // ── On-chain limit order book (Issue #701) ───────────────────────────────
@@ -1284,6 +1465,25 @@ impl TimeLockedUpgradeContract {
     ) -> Result<orders::limit::LimitOrder, ContractError> {
         let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
         orders::limit::place_order(&env, maker, pair, price_tick, sell_amount)
+    }
+
+    pub fn place_limit_order_with_expiry(
+        env: Env,
+        maker: Address,
+        pair: orders::limit::AssetPair,
+        price_tick: i128,
+        sell_amount: i128,
+        expiry: u32,
+    ) -> Result<orders::limit::LimitOrder, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::place_order_with_expiry(
+            &env,
+            maker,
+            pair,
+            price_tick,
+            sell_amount,
+            expiry,
+        )
     }
 
     pub fn fill_limit_order(
@@ -1392,46 +1592,28 @@ impl TimeLockedUpgradeContract {
         bridge::escrow::get_config(&env)
     }
 
-    pub fn calculate_utilization(env: Env, cash: i128, borrows: i128) -> u32 {
-        vaults::interest::InterestRateController::calculate_utilization(cash, borrows)
+    // --- Private remittance commitment tree ---
+
+    pub fn insert_commitment(
+        env: Env, commitment: BytesN<32>,
+    ) -> Result<(u64, BytesN<32>), ContractError> {
+        escrow::merkle::insert(&env, commitment)
     }
 
-    pub fn calculate_interest_rate(env: Env, utilization: u32, config: vaults::interest::InterestRateConfig) -> u32 {
-        vaults::interest::InterestRateController::calculate_interest_rate(utilization, &config)
+    pub fn commitment_root(env: Env) -> BytesN<32> {
+        escrow::merkle::current_root(&env)
     }
 
-    pub fn accrue_interest(
-        env: Env,
-        mut pool: vaults::interest::PoolState,
-        config: vaults::interest::InterestRateConfig,
-    ) -> (vaults::interest::PoolState, i128) {
-        let accrued = vaults::interest::InterestRateController::accrue_interest(&env, &mut pool, &config);
-        (pool, accrued)
+    pub fn commitment_next_index(env: Env) -> u64 {
+        escrow::merkle::next_index(&env)
     }
 
-    pub fn optimize_address(env: Env, addr: Address) -> BytesN<32> {
-        storage::KeyOptimizer::address_to_bytes32(&addr)
+    pub fn is_known_commitment_root(env: Env, root: BytesN<32>) -> bool {
+        escrow::merkle::is_known_root(&env, root)
     }
 
-    pub fn optimize_string(env: Env, s: String) -> BytesN<32> {
-        storage::KeyOptimizer::string_to_bytes32(&env, &s)
-    }
-
-    pub fn get_liquidity_depth(env: Env, pair: orders::limit::AssetPair, is_bid: bool) -> Vec<orders::limit::LiquidityLevel> {
-        orders::limit::get_liquidity_depth(&env, pair, is_bid)
-    }
-
-    pub fn enforce_auth_isolation(env: Env, expected_caller: Address) -> Result<(), ContractError> {
-        security::auth_guard::AuthContextGuard::enforce_isolation(&env, &expected_caller)
-    }
-
-    pub fn execute_isolated_call(
-        env: Env,
-        target_contract: Address,
-        function_name: Symbol,
-        args: Vec<Val>,
-    ) -> Result<Val, ContractError> {
-        security::auth_guard::AuthContextGuard::execute_isolated_call(&env, &target_contract, &function_name, args)
+    pub fn commitment_root_history(env: Env) -> Vec<BytesN<32>> {
+        escrow::merkle::root_history(&env)
     }
 
     // --- Private Helpers ---
