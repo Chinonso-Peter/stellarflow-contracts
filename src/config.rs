@@ -17,14 +17,27 @@
 //! would leave neighbouring slots in an inconsistent state across ledger
 //! registers.
 
-use soroban_sdk::{contracttype, symbol_short, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 
 use crate::{ContractData, ContractError, DATA_KEY};
+
+/// Multi-sig threshold governing admin-key rotations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminKeySet {
+    /// Current administrator addresses authorized to rotate the key set.
+    pub signers: Vec<Address>,
+    /// Number of approvals required from `signers` to rotate keys.
+    pub threshold: u32,
+}
 
 // ── Storage key ──────────────────────────────────────────────────────────────
 
 /// Ledger instance-storage key for the sealed variance configuration.
 pub(crate) const PRICE_VARIANCE_CONFIG_KEY: Symbol = symbol_short!("PVARCFG");
+
+/// Ledger instance-storage key for the multi-sig admin key set.
+pub(crate) const ADMIN_KEY_SET_KEY: Symbol = symbol_short!("ADMINKEYS");
 
 // ── Default thresholds ───────────────────────────────────────────────────────
 
@@ -175,6 +188,70 @@ pub fn validate_price_variance_config(cfg: &PriceVarianceConfig) -> Result<(), C
 
     Ok(())
 }
+/// Verify that a proposed admin key set satisfies multi-sig sanity rules.
+pub fn validate_admin_key_set(keys: &AdminKeySet) -> Result<(), ContractError> {
+    if keys.signers.len() == 0 || keys.threshold == 0 || keys.threshold > keys.signers.len() {
+        return Err(ContractError::InvalidVarianceConfig);
+    }
+    if has_duplicate_addresses(&keys.signers) {
+        return Err(ContractError::InvalidVarianceConfig);
+    }
+    Ok(())
+}
+
+/// Read the current governing admin key set.
+pub fn get_admin_key_set(env: &Env) -> Result<AdminKeySet, ContractError> {
+    let stored: Option<AdminKeySet> = env.storage().instance().get(&ADMIN_KEY_SET_KEY);
+    if let Some(keys) = stored {
+        return Ok(keys);
+    }
+
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
+    let mut signers = Vec::new(env);
+    signers.push_back(data.admin.clone());
+    Ok(AdminKeySet { signers, threshold: 1 })
+}
+
+/// Rotate the multi-sig admin keys after receiving current-threshold approval.
+pub fn rotate_admin_keys(
+    env: &Env,
+    approving_signers: Vec<Address>,
+    new_signers: Vec<Address>,
+    new_threshold: u32,
+) -> Result<(), ContractError> {
+    let current = get_admin_key_set(env)?;
+    validate_admin_key_set(&current)?;
+    validate_admin_key_set(&AdminKeySet {
+        signers: new_signers.clone(),
+        threshold: new_threshold,
+    })?;
+
+    if has_duplicate_addresses(&approving_signers) || approving_signers.len() < current.threshold {
+        return Err(ContractError::NotAdmin);
+    }
+
+    for signer in approving_signers.iter() {
+        signer.require_auth();
+        if !current.signers.iter().any(|member| member == signer) {
+            return Err(ContractError::NotAdmin);
+        }
+    }
+
+    let new_key_set = AdminKeySet {
+        signers: new_signers.clone(),
+        threshold: new_threshold,
+    };
+    env.storage().instance().set(&ADMIN_KEY_SET_KEY, &new_key_set);
+
+    let mut data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .
 
 // ── Storage accessors ─────────────────────────────────────────────────────────
 

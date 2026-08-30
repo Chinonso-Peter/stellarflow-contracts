@@ -172,6 +172,58 @@ pub fn verify_upgrade_quorum(env: &Env, signers: &Vec<Address>) -> Result<(), Co
     Ok(())
 }
 
+pub fn rotate_admin_keys(
+    env: &Env,
+    signers: &Vec<Address>,
+    new_signers: Vec<Address>,
+    new_threshold: u32,
+) -> Result<(), ContractError> {
+    verify_upgrade_quorum(env, signers)?;
+
+    let mut signer_set: Map<Address, ()> = Map::new(env);
+    for signer in new_signers.iter() {
+        signer_set.set(signer.clone(), ());
+    }
+
+    if new_threshold == 0 || new_threshold > signer_set.len() {
+        return Err(ContractError::InvalidThreshold);
+    }
+
+    let mut weights: Map<Address, u32> = Map::new(env);
+    for signer in new_signers.iter() {
+        weights.set(signer.clone(), 1u32);
+    }
+
+    let mut data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
+    data.admin = new_signers
+        .get(0)
+        .ok_or(ContractError::InvalidThreshold)?
+        .clone();
+
+    env.storage().instance().set(&DATA_KEY, &data);
+    env.storage().instance().set(&SIGNERS_KEY, &signer_set);
+    env.storage().instance().set(&SIGNER_WEIGHTS_KEY, &weights);
+
+    set_governance_config(env, &GovernanceConfig {
+        quorum_threshold: new_threshold,
+    });
+    set_multisig_config(env, &MultiSigConfig {
+        required_weight: new_threshold,
+        max_signer_weight: get_multisig_config(env).max_signer_weight.max(1u32),
+    });
+
+    env.events().publish(
+        (Symbol::new(env, "AdminKeysRotated"),),
+        new_signers,
+    );
+
+    Ok(())
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct StagedUpgrade {
