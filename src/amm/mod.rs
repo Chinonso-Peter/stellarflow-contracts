@@ -1,3 +1,4 @@
+pub mod adaptive_fee;
 pub mod circuit_breaker;
 pub mod invariant;
 pub mod slippage;

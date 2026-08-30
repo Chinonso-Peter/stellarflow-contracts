@@ -143,6 +143,9 @@ pub const EV_BALLOT_CLOSED: Symbol = symbol_short!("ball_clos");
 /// Governance: a proposal was vetoed by the Security Council.
 pub const EV_PROPOSAL_VETOED: Symbol = symbol_short!("prop_vet");
 
+/// AMM: an adaptive swap fee was scaled to a new value due to pool volatility.
+pub const EV_ADAPTIVE_FEE: Symbol = symbol_short!("afee_upd");
+
 // ---------------------------------------------------------------------------
 // Core publishing function
 // ---------------------------------------------------------------------------

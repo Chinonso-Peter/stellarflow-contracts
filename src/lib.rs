@@ -1039,6 +1039,62 @@ impl TimeLockedUpgradeContract {
         config::set_price_variance_config(&env, &caller, cfg)
     }
 
+    // ── Issue #766: Adaptive fee scaling based on pool volatility ────────────
+
+    /// Configure adaptive (volatility-based) fee scaling for a pool. Admin-only.
+    pub fn set_adaptive_fee_config(
+        env: Env,
+        caller: Address,
+        pool: AssetId,
+        cfg: config::AdaptiveFeeConfig,
+    ) -> Result<(), ContractError> {
+        config::set_adaptive_fee_config(&env, &caller, pool, cfg)
+    }
+
+    /// Read the adaptive fee configuration for a pool; `None` if the pool has
+    /// not opted in and therefore keeps the legacy volume-based fee.
+    pub fn get_adaptive_fee_config(env: Env, pool: AssetId) -> Option<config::AdaptiveFeeConfig> {
+        config::get_adaptive_fee_config(&env, pool)
+    }
+
+    /// Record a short-term price observation for a pool into its volatility
+    /// ring buffer. Respects the configured sample interval.
+    pub fn record_price_observation(
+        env: Env,
+        pool: AssetId,
+        asset_symbol: Symbol,
+        price: i128,
+    ) -> Result<u64, ContractError> {
+        amm::adaptive_fee::record_price_observation(&env, pool, asset_symbol, price)
+    }
+
+    /// Pull the pool's current TWAP price from an oracle contract and record
+    /// it into the volatility ring buffer.
+    pub fn observe_from_oracle(
+        env: Env,
+        pool: AssetId,
+        asset_symbol: Symbol,
+        oracle: Address,
+    ) -> Result<u64, ContractError> {
+        amm::adaptive_fee::observe_from_oracle(&env, pool, asset_symbol, &oracle)
+    }
+
+    /// Current adaptive fee snapshot for a pool (fee + volatility + config).
+    pub fn get_adaptive_fee(
+        env: Env,
+        pool: AssetId,
+    ) -> Result<amm::adaptive_fee::AdaptiveFeeSnapshot, ContractError> {
+        amm::adaptive_fee::get_adaptive_fee_snapshot(&env, pool)
+    }
+
+    /// Current effective short-term volatility (bps) for a pool.
+    pub fn get_pool_volatility(
+        env: Env,
+        pool: AssetId,
+    ) -> Result<u64, ContractError> {
+        amm::adaptive_fee::get_pool_volatility_bps(&env, pool)
+    }
+
     /// End the current consensus epoch: remove the cache, heartbeat map, and any
     /// active revocation ballot from Temporary storage so the ledger stays lean.
     pub fn finalize_consensus(env: Env) {

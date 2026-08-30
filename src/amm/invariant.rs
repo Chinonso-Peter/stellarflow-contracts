@@ -122,12 +122,14 @@ pub fn compute_swap_out(
         return Err(ContractError::InvalidInput);
     }
     
-    // Update volume history and get current dynamic fee
-    let fee_bps = crate::fees::update_volume_and_adjust_fee(
+    // Update volume history and derive the base dynamic fee, then apply the
+    // volatility-based adaptive scaling (Issue #766) when the pool opted in.
+    let legacy_fee_bps = crate::fees::update_volume_and_adjust_fee(
         env, 
         asset, 
         amount_in as u64
     )?;
+    let fee_bps = crate::fees::resolve_swap_fee_bps(env, asset, legacy_fee_bps)?;
     
     // Calculate raw output before fees
     let denominator = reserve_in
