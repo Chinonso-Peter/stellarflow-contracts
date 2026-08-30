@@ -99,6 +99,16 @@ pub enum CorridorFeeKey {
     FeeByAsset(Symbol),
 }
 
+/// Tuple-based bridge validator storage key: (current set / rotation sequence).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BridgeValidatorKey {
+    /// Current trusted validator public keys.
+    BridgeValidators,
+    /// Rotation sequence number, incremented on each validator set update.
+    BridgeRotationSeq,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeedStakeValue {
