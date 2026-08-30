@@ -28,12 +28,18 @@ pub struct LimitOrder {
     pub id: u64,
     pub maker: Address,
     pub pair: AssetPair,
+    pub sell_asset: Address,
+    pub buy_asset: Address,
     /// Price in `buy_asset` per unit of `sell_asset`, fixed-point at `PRICE_SCALE`.
     pub price_tick: i128,
+    /// Remaining sell-asset collateral locked by this order.
+    pub amount: i128,
     pub original_amount: i128,
     pub remaining_amount: i128,
     pub filled_amount: i128,
     pub created_at_ledger: u32,
+    /// Expiry ledger sequence; zero means the order does not expire.
+    pub expiry: u32,
     pub active: bool,
 }
 
@@ -51,8 +57,10 @@ pub struct FillResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OrderStorageKey {
     NextOrderId,
-    /// Order struct keyed by its unique id.
-    Order(u64),
+    /// Index from the public order id to its canonical composite storage key.
+    OrderIndex(u64),
+    /// Order struct keyed by `(AssetPair, PriceTick, OrderID)`.
+    Order(AssetPair, i128, u64),
     /// Resting-order index bucket keyed by `(AssetPair, PriceTick)`, listing
     /// the ids of every order posted at that exact tick for that pair — this
     /// is the `(AssetPair, PriceTick, OrderID)` addressing scheme fill
@@ -71,17 +79,35 @@ fn next_order_id(env: &Env) -> u64 {
 }
 
 fn load_order(env: &Env, order_id: u64) -> Result<LimitOrder, ContractError> {
+    let index: (AssetPair, i128) = env
+        .storage()
+        .persistent()
+        .get(&OrderStorageKey::OrderIndex(order_id))
+        .ok_or(ContractError::OrderNotFound)?;
     env.storage()
         .persistent()
-        .get(&OrderStorageKey::Order(order_id))
+        .get(&OrderStorageKey::Order(index.0, index.1, order_id))
         .ok_or(ContractError::OrderNotFound)
 }
 
 fn save_order(env: &Env, order: &LimitOrder) {
-    let key = OrderStorageKey::Order(order.id);
+    let key = OrderStorageKey::Order(
+        order.pair.clone(),
+        order.price_tick,
+        order.id,
+    );
     env.storage().persistent().set(&key, order);
     env.storage().persistent().extend_ttl(
         &key,
+        crate::storage::PERSISTENT_TTL_THRESHOLD,
+        crate::storage::PERSISTENT_TTL_THRESHOLD,
+    );
+    let index_key = OrderStorageKey::OrderIndex(order.id);
+    env.storage()
+        .persistent()
+        .set(&index_key, &(order.pair.clone(), order.price_tick));
+    env.storage().persistent().extend_ttl(
+        &index_key,
         crate::storage::PERSISTENT_TTL_THRESHOLD,
         crate::storage::PERSISTENT_TTL_THRESHOLD,
     );
@@ -123,6 +149,18 @@ pub fn place_order(
     price_tick: i128,
     sell_amount: i128,
 ) -> Result<LimitOrder, ContractError> {
+    place_order_with_expiry(env, maker, pair, price_tick, sell_amount, 0)
+}
+
+/// Post a limit order with an optional ledger-sequence expiry.
+pub fn place_order_with_expiry(
+    env: &Env,
+    maker: Address,
+    pair: AssetPair,
+    price_tick: i128,
+    sell_amount: i128,
+    expiry: u32,
+) -> Result<LimitOrder, ContractError> {
     if sell_amount <= 0 {
         return Err(ContractError::OrderZeroAmount);
     }
@@ -138,16 +176,23 @@ pub fn place_order(
         id: next_order_id(env),
         maker,
         pair: pair.clone(),
+        sell_asset: pair.sell_asset.clone(),
+        buy_asset: pair.buy_asset.clone(),
         price_tick,
+        amount: sell_amount,
         original_amount: sell_amount,
         remaining_amount: sell_amount,
         filled_amount: 0,
         created_at_ledger: env.ledger().sequence(),
+        expiry,
         active: true,
     };
 
     save_order(env, &order);
     bucket_push(env, &pair, price_tick, order.id);
+
+    let is_bid = pair.sell_asset > pair.buy_asset;
+    add_tick_liquidity(env, &pair, price_tick, sell_amount, is_bid);
 
     Ok(order)
 }
@@ -164,6 +209,9 @@ pub fn fill_order(env: &Env, filler: Address, order_id: u64, fill_amount: i128) 
 
     let mut order = load_order(env, order_id)?;
     if !order.active {
+        return Err(ContractError::OrderAlreadyClosed);
+    }
+    if order.expiry != 0 && env.ledger().sequence() > order.expiry {
         return Err(ContractError::OrderAlreadyClosed);
     }
     if fill_amount > order.remaining_amount {
@@ -186,6 +234,7 @@ pub fn fill_order(env: &Env, filler: Address, order_id: u64, fill_amount: i128) 
         .remaining_amount
         .checked_sub(fill_amount)
         .ok_or(ContractError::MathOverflow)?;
+    order.amount = order.remaining_amount;
     order.filled_amount = order
         .filled_amount
         .checked_add(fill_amount)
@@ -197,6 +246,9 @@ pub fn fill_order(env: &Env, filler: Address, order_id: u64, fill_amount: i128) 
         bucket_remove(env, &order.pair, order.price_tick, order.id);
     }
     save_order(env, &order);
+
+    let is_bid = order.pair.sell_asset > order.pair.buy_asset;
+    remove_tick_liquidity(env, &order.pair, order.price_tick, fill_amount, is_bid);
 
     env.events().publish(
         (soroban_sdk::symbol_short!("ord_fill"), order.id),
@@ -227,9 +279,13 @@ pub fn cancel_order(env: &Env, maker: Address, order_id: u64) -> Result<i128, Co
 
     let recovered = order.remaining_amount;
     order.remaining_amount = 0;
+    order.amount = 0;
     order.active = false;
     bucket_remove(env, &order.pair, order.price_tick, order.id);
     save_order(env, &order);
+
+    let is_bid = order.pair.sell_asset > order.pair.buy_asset;
+    remove_tick_liquidity(env, &order.pair, order.price_tick, recovered, is_bid);
 
     if recovered > 0 {
         let sell_client = token::Client::new(env, &order.pair.sell_asset);
@@ -240,7 +296,7 @@ pub fn cancel_order(env: &Env, maker: Address, order_id: u64) -> Result<i128, Co
 }
 
 pub fn get_order(env: &Env, order_id: u64) -> Option<LimitOrder> {
-    env.storage().persistent().get(&OrderStorageKey::Order(order_id))
+    load_order(env, order_id).ok()
 }
 
 /// List the ids of every order currently resting at `(pair, price_tick)`.
@@ -249,6 +305,114 @@ pub fn get_orders_at_tick(env: &Env, pair: AssetPair, price_tick: i128) -> Vec<u
         .persistent()
         .get(&OrderStorageKey::Bucket(pair, price_tick))
         .unwrap_or_else(|| Vec::new(env))
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LiquidityStorageKey {
+    ActiveTicks(AssetPair, bool),
+    TickVolume(AssetPair, i128, bool),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidityLevel {
+    pub price_tick: i128,
+    pub volume: i128,
+}
+
+pub fn add_tick_liquidity(env: &Env, pair: &AssetPair, price_tick: i128, amount: i128, is_bid: bool) {
+    if amount <= 0 {
+        return;
+    }
+    let vol_key = LiquidityStorageKey::TickVolume(pair.clone(), price_tick, is_bid);
+    let current_vol: i128 = env.storage().persistent().get(&vol_key).unwrap_or(0);
+    let new_vol = current_vol + amount;
+    env.storage().persistent().set(&vol_key, &new_vol);
+    env.storage().persistent().extend_ttl(&vol_key, crate::storage::PERSISTENT_TTL_THRESHOLD, crate::storage::PERSISTENT_TTL_THRESHOLD);
+
+    if current_vol == 0 {
+        let ticks_key = LiquidityStorageKey::ActiveTicks(pair.clone(), is_bid);
+        let mut ticks: Vec<i128> = env.storage().persistent().get(&ticks_key).unwrap_or_else(|| Vec::new(env));
+        ticks.push_back(price_tick);
+        
+        let mut temp_rust_vec = soroban_sdk::vec![env];
+        for t in ticks.iter() {
+            temp_rust_vec.push_back(t);
+        }
+        
+        let len = temp_rust_vec.len();
+        for i in 1..len {
+            let key_val = temp_rust_vec.get(i).unwrap();
+            let mut j = i;
+            if is_bid {
+                while j > 0 && temp_rust_vec.get(j - 1).unwrap() < key_val {
+                    temp_rust_vec.set(j, temp_rust_vec.get(j - 1).unwrap());
+                    j -= 1;
+                }
+            } else {
+                while j > 0 && temp_rust_vec.get(j - 1).unwrap() > key_val {
+                    temp_rust_vec.set(j, temp_rust_vec.get(j - 1).unwrap());
+                    j -= 1;
+                }
+            }
+            temp_rust_vec.set(j, key_val);
+        }
+
+        let mut sorted_ticks = Vec::new(env);
+        for t in temp_rust_vec.iter() {
+            sorted_ticks.push_back(t);
+        }
+        env.storage().persistent().set(&ticks_key, &sorted_ticks);
+        env.storage().persistent().extend_ttl(&ticks_key, crate::storage::PERSISTENT_TTL_THRESHOLD, crate::storage::PERSISTENT_TTL_THRESHOLD);
+    }
+}
+
+pub fn remove_tick_liquidity(env: &Env, pair: &AssetPair, price_tick: i128, amount: i128, is_bid: bool) {
+    if amount <= 0 {
+        return;
+    }
+    let vol_key = LiquidityStorageKey::TickVolume(pair.clone(), price_tick, is_bid);
+    let current_vol: i128 = env.storage().persistent().get(&vol_key).unwrap_or(0);
+    let new_vol = if current_vol <= amount { 0 } else { current_vol - amount };
+    
+    if new_vol == 0 {
+        env.storage().persistent().remove(&vol_key);
+        let ticks_key = LiquidityStorageKey::ActiveTicks(pair.clone(), is_bid);
+        if let Some(ticks) = env.storage().persistent().get::<_, Vec<i128>>(&ticks_key) {
+            let mut updated = Vec::new(env);
+            for t in ticks.iter() {
+                if t != price_tick {
+                    updated.push_back(t);
+                }
+            }
+            if updated.is_empty() {
+                env.storage().persistent().remove(&ticks_key);
+            } else {
+                env.storage().persistent().set(&ticks_key, &updated);
+                env.storage().persistent().extend_ttl(&ticks_key, crate::storage::PERSISTENT_TTL_THRESHOLD, crate::storage::PERSISTENT_TTL_THRESHOLD);
+            }
+        }
+    } else {
+        env.storage().persistent().set(&vol_key, &new_vol);
+        env.storage().persistent().extend_ttl(&vol_key, crate::storage::PERSISTENT_TTL_THRESHOLD, crate::storage::PERSISTENT_TTL_THRESHOLD);
+    }
+}
+
+pub fn get_liquidity_depth(env: &Env, pair: AssetPair, is_bid: bool) -> Vec<LiquidityLevel> {
+    let ticks_key = LiquidityStorageKey::ActiveTicks(pair.clone(), is_bid);
+    let ticks: Vec<i128> = env.storage().persistent().get(&ticks_key).unwrap_or_else(|| Vec::new(env));
+    let mut levels = Vec::new(env);
+    
+    let count = if ticks.len() > 20 { 20 } else { ticks.len() };
+    for i in 0..count {
+        let price_tick = ticks.get(i).unwrap();
+        let vol_key = LiquidityStorageKey::TickVolume(pair.clone(), price_tick, is_bid);
+        if let Some(volume) = env.storage().persistent().get::<_, i128>(&vol_key) {
+            levels.push_back(LiquidityLevel { price_tick, volume });
+        }
+    }
+    levels
 }
 
 #[cfg(test)]
