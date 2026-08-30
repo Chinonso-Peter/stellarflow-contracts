@@ -123,6 +123,12 @@ pub const PROFILE_TTL_THRESHOLD: u32 = 10_000;
 /// Calculation: 31 days × 24 hours × 60 minutes × 60 seconds / 5-second ledger ≈ 535,680
 pub const PERSISTENT_TTL_THRESHOLD: u32 = 535_680;
 
+pub fn extend_persistent_ttl<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_THRESHOLD);
+}
+
 pub fn get_node_profiles(env: &Env) -> Map<Address, NodeProfile> {
     let key = Symbol::new(env, "NODES");
     if env.storage().persistent().has(&key) {
@@ -163,7 +169,7 @@ pub fn extend_asset_rent(env: &Env, asset: Symbol) -> bool {
 /// instance-storage TTL so gating logic that depends on instance data never
 /// trips over an expired instance entry.
 pub fn preflight_rent_check(env: &Env) {
-    env.storage().instance().extend_ttl(0, ASET_TTL_THRESHOLD);
+    env.storage().instance().extend_ttl(0, ASSET_TTL_THRESHOLD);
 }
 
 /// Prune a feed stake entry that has gone stale (issue #522: storage-rent
@@ -299,4 +305,47 @@ pub fn cancel_order_refund(env: &Env, order_id: u64) -> u64 {
     env.storage().persistent().remove(&order_key);
 
     refund
+}
+
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OptimizedDataKey {
+    Account(soroban_sdk::BytesN<32>),
+    EventTopic(soroban_sdk::BytesN<32>),
+}
+
+pub struct KeyOptimizer;
+
+impl KeyOptimizer {
+    pub fn address_to_bytes32(addr: &soroban_sdk::Address) -> soroban_sdk::BytesN<32> {
+        let env = addr.env();
+        let bytes = addr.to_xdr(env);
+        env.crypto().sha256(&bytes)
+    }
+
+    pub fn string_to_bytes32(env: &soroban_sdk::Env, s: &soroban_sdk::String) -> soroban_sdk::BytesN<32> {
+        let bytes = s.to_xdr(env);
+        env.crypto().sha256(&bytes)
+    }
+
+    pub fn save_optimized_account(env: &soroban_sdk::Env, addr: &soroban_sdk::Address, value: &soroban_sdk::Val) {
+        let hashed_key = Self::address_to_bytes32(addr);
+        let key = OptimizedDataKey::Account(hashed_key);
+        env.storage().persistent().set(&key, value);
+        extend_persistent_ttl(env, &key);
+    }
+
+    pub fn get_optimized_account<V: soroban_sdk::IntoVal<soroban_sdk::Env, soroban_sdk::Val> + soroban_sdk::TryFromVal<soroban_sdk::Env, soroban_sdk::Val>>(
+        env: &soroban_sdk::Env,
+        addr: &soroban_sdk::Address,
+    ) -> Option<V> {
+        let hashed_key = Self::address_to_bytes32(addr);
+        let key = OptimizedDataKey::Account(hashed_key);
+        if env.storage().persistent().has(&key) {
+            extend_persistent_ttl(env, &key);
+            env.storage().persistent().get(&key)
+        } else {
+            None
+        }
+    }
 }
