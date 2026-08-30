@@ -64,8 +64,10 @@ pub fn asset_id_to_symbol(asset_id: u32) -> Symbol {
 pub(crate) mod nonce;
 use crate::nonce::{consume_nonce, get_nonce};
 
+pub mod action_guard;
 pub mod amm;
 pub mod admin;
+pub mod amm;
 pub mod auth;
 pub mod bridge;
 pub mod escrow;
@@ -80,19 +82,27 @@ pub mod events;
 pub mod fees;
 pub mod governance;
 pub mod math;
+pub mod orders;
 pub mod recovery;
+pub mod roles;
+pub mod router;
+pub mod security;
+pub mod settlement;
 pub mod slashing;
 pub mod staging;
 pub mod staking_tiers;
 pub mod router;
 pub mod settlement;
+pub mod state_verification;
 pub mod storage;
 pub mod zk;
 pub mod temp_governance;
-pub mod security;
 pub mod upgrades;
 pub mod validation;
-pub mod veto;
+pub use state_verification::{
+    assert_contract_state_sanity, verify_contract_state, verify_storage_ttl_bumps,
+    verify_zero_loss_accounting,
+};
 use crate::governance::{
     verify_staged_delay, StagedUpgrade, VotingBallot, open_ballot, cast_vote, close_ballot,
     verify_upgrade_quorum, GovernanceUpgradeProposal, GovernanceUpgradeProposedEvent,
@@ -234,6 +244,7 @@ impl ContractError {
     pub const OrderNotMaker: Self = Self::Unauthorized;
     pub const RoleExpirationInPast: Self = Self::UpgradeTimelockNotSatisfied;
     pub const RoleNotFound: Self = Self::NotRegistered;
+    pub const UnauthorizedReentryAttempt: Self = Self::Unauthorized;
     pub const RoleExpiredOrMissing: Self = Self::Unauthorized;
 }
 
@@ -343,6 +354,19 @@ impl TimeLockedUpgradeContract {
 
 #[contractimpl]
 impl TimeLockedUpgradeContract {
+    /// Atomically consume a nullifier for a private transfer.
+    ///
+    /// The persistent key is checked and written in this invocation, so a
+    /// replay returns before any caller-supplied transfer side effect runs.
+    pub fn consume_private_transfer_nullifier(
+        env: Env,
+        caller: Address,
+        nullifier: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        crate::zk::nullifier::register_nullifier(&env, nullifier)
+    }
+
     pub fn initialize(env: Env, admin: Address, treasury: Address) -> Result<(), ContractError> {
         let _dummy: soroban_sdk::Error = soroban_sdk::Error::from_contract_error(1);
         ensure_schema_version(&env)?;
@@ -463,6 +487,18 @@ impl TimeLockedUpgradeContract {
 
     pub fn get_data(env: Env) -> Result<ContractData, ContractError> {
         Self::load_data(&env)
+    }
+
+    pub fn verify_storage_ttl(env: Env) -> Result<(), ContractError> {
+        verify_storage_ttl_bumps(&env)
+    }
+
+    pub fn verify_zero_loss(env: Env) -> Result<(), ContractError> {
+        verify_zero_loss_accounting(&env)
+    }
+
+    pub fn verify_contract_state(env: Env) -> Result<(), ContractError> {
+        verify_contract_state(&env)
     }
 
     pub fn propose_upgrade(
@@ -686,7 +722,7 @@ impl TimeLockedUpgradeContract {
     }
 
     pub fn is_data_fresh(env: Env, asset: AssetId) -> bool {
-        let heartbeat_key = HeartbeatKey(asset);
+        let heartbeat_key = storage::HeartbeatKey::HeartbeatByAsset(asset);
         if let Some(last_update) = env.storage().temporary().get::<_, u64>(&heartbeat_key) {
             env.ledger().timestamp().saturating_sub(last_update) <= Self::_get_interval(&env)
         } else {
@@ -1339,32 +1375,6 @@ impl TimeLockedUpgradeContract {
 )?;
         Ok(result)
     }
-       
-    pub fn update_validator_profile(env: Env, node: Address, pool: Symbol) -> Result<(), ContractError> {
-        admin::assert_not_revoked(&env, &node)?;
-        node.require_auth();
-        check_bond_capacity(&env, &node, &pool)?;
-        let asset_id = symbol_to_asset_id(&pool);
-        check_liquidity_depth(&env, asset_id)?;
-        storage::update_feed_stake_activity(&env, node.clone(), asset_id);
-        Self::_record_heartbeat(&env, asset_id);
-        Ok(())
-    }
-
-    pub fn submit_telemetry_data(
-        env: Env, node: Address, pool: Symbol,
-        payload_timestamp: u64, reserve_a: i128, reserve_b: i128, volume_24h: i128,
-    ) -> Result<(), ContractError> {
-        admin::assert_not_revoked(&env, &node)?;
-        node.require_auth();
-        validate_telemetry_submission(&env, &node, &pool, payload_timestamp, reserve_a, reserve_b, volume_24h)?;
-        Self::_record_heartbeat(&env, symbol_to_asset_id(&pool));
-        env.events().publish(
-            (soroban_sdk::symbol_short!("telem_ok"),),
-            (node, pool, payload_timestamp),
-        );
-        Ok(())
-    }
 
     // ── Revocable admin role delegation with expiration (Issue #703) ────────
 
@@ -1441,6 +1451,27 @@ impl TimeLockedUpgradeContract {
 
     pub fn vault_share_balance(env: Env, holder: Address) -> i128 {
         vaults::autocompound::get_share_balance(&env, holder)
+    }
+
+    /// Evaluate a vault liquidation against verified TWAP prices from the
+    /// oracle. Liquidation is allowed below 110% collateralization and
+    /// allocates 5% of confiscated collateral to the liquidator.
+    pub fn vault_liquidation_quote(
+        env: Env,
+        oracle: Address,
+        collateral_asset: Symbol,
+        debt_asset: Symbol,
+        position: vaults::liquidation::VaultPosition,
+        purchase_collateral: u128,
+    ) -> Result<vaults::liquidation::LiquidationResult, ContractError> {
+        vaults::liquidation::liquidate_at_twap(
+            &env,
+            &oracle,
+            &collateral_asset,
+            &debt_asset,
+            &position,
+            purchase_collateral,
+        )
     }
 
     pub fn vault_config(env: Env) -> Option<vaults::autocompound::VaultConfig> {
@@ -1540,9 +1571,17 @@ impl TimeLockedUpgradeContract {
         orders::limit::fill_order(&env, filler, order_id, fill_amount)
     }
 
+    pub fn match_limit_orders(
+        env: Env, seller_order_id: u64, buyer_order_id: u64, fill_amount: i128,
+    ) -> Result<orders::limit::SettlementResult, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::match_orders(&env, seller_order_id, buyer_order_id, fill_amount)
+    }
+
     /// Cancel a still-open order and return its unfilled balance to the maker.
     pub fn cancel_limit_order(env: Env, maker: Address, order_id: u64) -> Result<i128, ContractError> {
         let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        maker.require_auth();
         orders::limit::cancel_order(&env, maker, order_id)
     }
 
@@ -1552,6 +1591,17 @@ impl TimeLockedUpgradeContract {
 
     pub fn get_orders_at_tick(env: Env, pair: orders::limit::AssetPair, price_tick: i128) -> Vec<u64> {
         orders::limit::get_orders_at_tick(&env, pair, price_tick)
+    }
+
+    pub fn get_order_balance(env: Env, owner: Address, asset: Address) -> i128 {
+        orders::limit::get_balance(&env, owner, asset)
+    }
+
+    pub fn withdraw_order_balance(
+        env: Env, owner: Address, asset: Address, amount: i128,
+    ) -> Result<i128, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::withdraw_balance(&env, owner, asset, amount)
     }
 
     // ── Multi-hop Route Swaps ───────────────────────────────────────────────
@@ -1601,6 +1651,27 @@ impl TimeLockedUpgradeContract {
 
     pub fn wrapped_asset_config(env: Env, asset_code: Symbol) -> Option<bridge::mint::BridgeAssetConfig> {
         bridge::mint::get_config(&env, asset_code)
+    }
+
+    pub fn set_wrapped_mint_rate_limit(
+        env: Env,
+        admin: Address,
+        asset_code: Symbol,
+        max_rolling_amount: i128,
+    ) -> Result<bridge::rate_limit::MintRateLimit, ContractError> {
+        bridge::rate_limit::set_limit(
+            &env,
+            admin,
+            bridge::rate_limit::RateLimitAsset::Wrapped(asset_code),
+            max_rolling_amount,
+        )
+    }
+
+    pub fn get_wrapped_mint_rate_limit(
+        env: Env,
+        asset_code: Symbol,
+    ) -> Option<bridge::rate_limit::MintRateLimit> {
+        bridge::rate_limit::get_limit(&env, bridge::rate_limit::RateLimitAsset::Wrapped(asset_code))
     }
 
     // --- Native bridge escrow (Issue #750) ---
@@ -1665,6 +1736,10 @@ impl TimeLockedUpgradeContract {
 
     // --- Private Helpers ---
 
+    fn _extend_instance_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(RELAYER_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+    }
+
     fn assert_contract_is_active(env: &Env) -> Result<(), ContractError> {
         if !env.storage().instance().has(&DATA_KEY) {
             return Err(ContractError::NotInitialized);
@@ -1676,7 +1751,7 @@ impl TimeLockedUpgradeContract {
     }
 
     fn _record_heartbeat(env: &Env, asset: AssetId) {
-        let heartbeat_key = HeartbeatKey(asset);
+        let heartbeat_key = storage::HeartbeatKey::HeartbeatByAsset(asset);
         env.storage().temporary().set(&heartbeat_key, &env.ledger().timestamp());
     }
 
@@ -1749,7 +1824,6 @@ impl TimeLockedUpgradeContract {
         }
         admin::cleanup::cleanup_zero_balances(&env, &signers, &targets)
     }
-}
 
 #[cfg(test)]
 mod query_guardrail_tests {
