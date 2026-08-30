@@ -1282,7 +1282,7 @@ impl TimeLockedUpgradeContract {
     /// Retrieve the veto record for a proposal, if it has been vetoed.
     ///
     /// Returns None if the proposal has not been vetoed.
-    pub fn get_veto_record(env: Env, proposal_id: u64) -> Option<veto::ProposalVeto> {
+    pub fn get_veto_record(env: Env, proposal_id: u64) -> Option<crate::veto::ProposalVeto> {
         veto::get_veto_record(&env, proposal_id)
     }
 
@@ -1708,6 +1708,10 @@ impl TimeLockedUpgradeContract {
 
     pub fn bridge_escrow_config(env: Env) -> Option<bridge::escrow::BridgeEscrowConfig> {
         bridge::escrow::get_config(&env)
+    }
+
+    pub fn reclaim_expired(env: Env, id: u64, sender: Address) -> Result<(), ContractError> {
+        bridge::escrow::reclaim_expired(&env, id, sender)
     }
 
     // --- Private remittance commitment tree ---
