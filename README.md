@@ -10,7 +10,7 @@ This repository contains smart contracts for the StellarFlow Network with a time
 - **Admin-Only Operations**: Only contract administrators can propose and execute upgrades
 - **Upgrade Cancellation**: Ability to cancel pending upgrades before execution
 - **Timelock Monitoring**: Functions to check remaining timelock time
-- **Staked Asset Unbonding Queue**: Mandatory delay queue for staking withdrawals (Documentation & Comments added)
+- **Storage Optimization**: Vault storage footprint audit completed for sub-map balance tracking.
 
 ## Architecture
 
@@ -31,4 +31,4 @@ This repository contains smart contracts for the StellarFlow Network with a time
 - `propose_upgrade()`: Initiates the 48-hour timelock period
 - `execute_upgrade()`: Executes the upgrade after timelock expires
 - `cancel_upgrade()`: Cancels a pending upgrade
-- `get_pending_upgrade()`: Queries pending upgrade status
+- `get_pending_upgrade()`: Returns pending upgrade info
