@@ -105,6 +105,48 @@ impl Default for PriceVarianceConfig {
     }
 }
 
+/// Compact byte-packed representation of [`PriceVarianceConfig`] to minimize
+/// Soroban instance storage foot-print and rent costs (Issue #747).
+///
+/// Refactors 4 independent config fields (u32, u32, u32, u64 = 20 raw bytes)
+/// into a single 64-bit packed payload (8 bytes):
+/// - bits [0..16]   : max_spread_bps (u16)
+/// - bits [16..32]  : max_deviation_bps (u16)
+/// - bits [32..40]  : min_submission_count (u8)
+/// - bits [40..64]  : max_submission_age_secs (24 bits)
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedPriceVarianceConfig {
+    pub packed: u64,
+}
+
+impl PriceVarianceConfig {
+    pub fn pack(&self) -> PackedPriceVarianceConfig {
+        let spread = (self.max_spread_bps.min(0xFFFF) as u64) & 0xFFFF;
+        let dev = ((self.max_deviation_bps.min(0xFFFF) as u64) & 0xFFFF) << 16;
+        let count = ((self.min_submission_count.min(0xFF) as u64) & 0xFF) << 32;
+        let age = ((self.max_submission_age_secs.min(0xFF_FFFF) as u64) & 0xFF_FFFF) << 40;
+        PackedPriceVarianceConfig {
+            packed: spread | dev | count | age,
+        }
+    }
+}
+
+impl PackedPriceVarianceConfig {
+    pub fn unpack(&self) -> PriceVarianceConfig {
+        let max_spread_bps = (self.packed & 0xFFFF) as u32;
+        let max_deviation_bps = ((self.packed >> 16) & 0xFFFF) as u32;
+        let min_submission_count = ((self.packed >> 32) & 0xFF) as u32;
+        let max_submission_age_secs = ((self.packed >> 40) & 0xFF_FFFF) as u64;
+        PriceVarianceConfig {
+            max_spread_bps,
+            max_deviation_bps,
+            min_submission_count,
+            max_submission_age_secs,
+        }
+    }
+}
+
 // ── Validation ───────────────────────────────────────────────────────────────
 
 /// Verify that every field of `cfg` satisfies the struct invariants.
@@ -398,5 +440,23 @@ mod tests {
             result,
             Err(Ok(ContractError::InvalidVarianceConfig))
         );
+    }
+
+    #[test]
+    fn test_storage_allocation_minimizer_rent_reduction_assertion() {
+        let original = PriceVarianceConfig::default();
+        let packed = original.pack();
+        let unpacked = packed.unpack();
+
+        assert_eq!(unpacked, original);
+
+        let original_size = std::mem::size_of::<PriceVarianceConfig>();
+        let packed_size = std::mem::size_of::<PackedPriceVarianceConfig>();
+
+        assert_eq!(original_size, 20);
+        assert_eq!(packed_size, 8);
+
+        let reduction_pct = ((original_size - packed_size) as f64 / original_size as f64) * 100.0;
+        assert!(reduction_pct >= 25.0, "Storage reduction percentage {}% is less than 25%", reduction_pct);
     }
 }
