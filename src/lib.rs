@@ -67,6 +67,7 @@ use crate::nonce::{consume_nonce, get_nonce};
 pub mod action_guard;
 pub mod amm;
 pub mod admin;
+pub mod amm;
 pub mod auth;
 pub mod bridge;
 pub mod escrow;
@@ -81,7 +82,12 @@ pub mod events;
 pub mod fees;
 pub mod governance;
 pub mod math;
+pub mod orders;
 pub mod recovery;
+pub mod roles;
+pub mod router;
+pub mod security;
+pub mod settlement;
 pub mod slashing;
 pub mod staging;
 pub mod staking_tiers;
@@ -90,7 +96,6 @@ pub mod settlement;
 pub mod storage;
 pub mod zk;
 pub mod temp_governance;
-pub mod security;
 pub mod upgrades;
 pub mod validation;
 use crate::governance::{
@@ -686,7 +691,7 @@ impl TimeLockedUpgradeContract {
     }
 
     pub fn is_data_fresh(env: Env, asset: AssetId) -> bool {
-        let heartbeat_key = HeartbeatKey(asset);
+        let heartbeat_key = storage::HeartbeatKey::HeartbeatByAsset(asset);
         if let Some(last_update) = env.storage().temporary().get::<_, u64>(&heartbeat_key) {
             env.ledger().timestamp().saturating_sub(last_update) <= Self::_get_interval(&env)
         } else {
@@ -1272,32 +1277,6 @@ impl TimeLockedUpgradeContract {
 )?;
         Ok(result)
     }
-       
-    pub fn update_validator_profile(env: Env, node: Address, pool: Symbol) -> Result<(), ContractError> {
-        admin::assert_not_revoked(&env, &node)?;
-        node.require_auth();
-        check_bond_capacity(&env, &node, &pool)?;
-        let asset_id = symbol_to_asset_id(&pool);
-        check_liquidity_depth(&env, asset_id)?;
-        storage::update_feed_stake_activity(&env, node.clone(), asset_id);
-        Self::_record_heartbeat(&env, asset_id);
-        Ok(())
-    }
-
-    pub fn submit_telemetry_data(
-        env: Env, node: Address, pool: Symbol,
-        payload_timestamp: u64, reserve_a: i128, reserve_b: i128, volume_24h: i128,
-    ) -> Result<(), ContractError> {
-        admin::assert_not_revoked(&env, &node)?;
-        node.require_auth();
-        validate_telemetry_submission(&env, &node, &pool, payload_timestamp, reserve_a, reserve_b, volume_24h)?;
-        Self::_record_heartbeat(&env, symbol_to_asset_id(&pool));
-        env.events().publish(
-            (soroban_sdk::symbol_short!("telem_ok"),),
-            (node, pool, payload_timestamp),
-        );
-        Ok(())
-    }
 
     // ── Revocable admin role delegation with expiration (Issue #703) ────────
 
@@ -1620,6 +1599,10 @@ impl TimeLockedUpgradeContract {
 
     // --- Private Helpers ---
 
+    fn _extend_instance_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(RELAYER_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+    }
+
     fn assert_contract_is_active(env: &Env) -> Result<(), ContractError> {
         if !env.storage().instance().has(&DATA_KEY) {
             return Err(ContractError::NotInitialized);
@@ -1631,7 +1614,7 @@ impl TimeLockedUpgradeContract {
     }
 
     fn _record_heartbeat(env: &Env, asset: AssetId) {
-        let heartbeat_key = HeartbeatKey(asset);
+        let heartbeat_key = storage::HeartbeatKey::HeartbeatByAsset(asset);
         env.storage().temporary().set(&heartbeat_key, &env.ledger().timestamp());
     }
 
@@ -1704,7 +1687,6 @@ impl TimeLockedUpgradeContract {
         }
         admin::cleanup::cleanup_zero_balances(&env, &signers, &targets)
     }
-}
 
 #[cfg(test)]
 mod query_guardrail_tests {
