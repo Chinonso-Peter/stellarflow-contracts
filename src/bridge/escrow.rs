@@ -2,7 +2,13 @@
 
 use soroban_sdk::{contracttype, symbol_short, token, Address, Bytes, BytesN, Env, Vec};
 
-use crate::{bridge::relayer, ContractData, ContractError, DATA_KEY};
+use crate::{
+    bridge::{
+        rate_limit::{self, RateLimitAsset},
+        relayer,
+    },
+    ContractData, ContractError, DATA_KEY,
+};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -209,9 +215,19 @@ pub fn unlock_tokens(
 
     // Invariant check: verify balance consistency before state change
     assert_balance_invariant(env, &config);
+    let current_balance: i128 = env
+        .storage()
+        .persistent()
+        .get(&BridgeEscrowStorageKey::VaultBalance(config.native_token.clone()))
+        .unwrap_or(0);
+    rate_limit::enforce_and_record(
+        env,
+        RateLimitAsset::Native(config.native_token.clone()),
+        proof.amount,
+        current_balance,
+    )?;
 
     let balance_key = BridgeEscrowStorageKey::VaultBalance(config.native_token.clone());
-    let current_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
     let new_balance = checked_sub_balance(current_balance, proof.amount)?;
     if new_balance == 0 {
         env.storage().persistent().remove(&balance_key);

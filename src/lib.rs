@@ -1585,6 +1585,27 @@ impl TimeLockedUpgradeContract {
         bridge::mint::get_config(&env, asset_code)
     }
 
+    pub fn set_wrapped_mint_rate_limit(
+        env: Env,
+        admin: Address,
+        asset_code: Symbol,
+        max_rolling_amount: i128,
+    ) -> Result<bridge::rate_limit::MintRateLimit, ContractError> {
+        bridge::rate_limit::set_limit(
+            &env,
+            admin,
+            bridge::rate_limit::RateLimitAsset::Wrapped(asset_code),
+            max_rolling_amount,
+        )
+    }
+
+    pub fn get_wrapped_mint_rate_limit(
+        env: Env,
+        asset_code: Symbol,
+    ) -> Option<bridge::rate_limit::MintRateLimit> {
+        bridge::rate_limit::get_limit(&env, bridge::rate_limit::RateLimitAsset::Wrapped(asset_code))
+    }
+
     // --- Native bridge escrow (Issue #750) ---
 
     pub fn configure_bridge_escrow(
