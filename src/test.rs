@@ -1422,7 +1422,7 @@ fn test_timelock_path_rejected_before_delay() {
     client.propose_admin_change(&admin, &new_admin);
     // Attempt immediate execution without waiting
     let result = client.try_execute_admin_change_by_timelock(&admin);
-    assert_eq!(result, Err(Ok(ContractError::AdminTimelockNotSatisfied)));
+    assert_eq!(result, Err(Ok(ContractError::AdminChangeTimelockNotSatis)));
 }
 
 #[test]
