@@ -94,17 +94,34 @@ pub fn submit_governance_proposal(
         }
     }
 
-    proposer.require_auth();
+/// Proposal state enumeration for governance lifecycle management.
+///
+/// Proposals transition through states as they move through voting, approval,
+/// and execution phases. The `Vetoed` state is terminal and prevents execution.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProposalState {
+    /// Proposal has been created and is awaiting voting.
+    Pending,
+    /// Proposal is currently in the voting/discussion phase.
+    Active,
+    /// Proposal has been approved by the required threshold and awaits execution.
+    Approved,
+    /// Proposal was rejected during voting (failed to reach threshold).
+    Rejected,
+    /// Proposal has been executed and is complete.
+    Executed,
+    /// Proposal was vetoed by the Security Council (terminal state).
+    Vetoed,
+}
 
-    let proposal_id = _next_proposal_id(env);
-    let proposal = GovernanceProposal {
-        proposal_id,
-        wasm_hash,
-        proposer: proposer.clone(),
-        staged_at: env.ledger().sequence(),
-        status: ProposalStatus::Pending,
-        cancellation_votes: Map::new(env),
-    };
+/// Get multi-signature weight configuration for WASM upgrade governance
+pub fn get_multisig_config(env: &Env) -> MultiSigConfig {
+    env.storage()
+        .instance()
+        .get(&QUORUM_WEIGHT_THRESHOLD_KEY)
+        .unwrap_or_default()
+}
 
     env.storage()
         .instance()
@@ -267,24 +284,44 @@ pub fn verify_staged_delay(staged_at: u32, current_ledger: u32) -> bool {
     current_ledger.saturating_sub(staged_at) >= MIN_LEDGER_DELAY
 }
 
-fn _load_proposal(env: &Env) -> Result<GovernanceProposal, ContractError> {
-    env.storage()
-        .instance()
-        .get(&GOVERNANCE_PROPOSAL_KEY)
-        .ok_or(ContractError::NoActiveProposal)
+pub fn open_ballot(
+    env: &Env,
+    proposal_id: Symbol,
+    target: Address,
+    replacement: Address,
+    proposer: Address,
+) -> Result<(), ContractError> {
+    let key = BallotKey::Proposal(proposal_id);
+    if env.storage().temporary().has(&key) {
+        return Err(ContractError::ProposalAlreadyActive);
+    }
+    let ballot = VotingBallot {
+        target,
+        replacement,
+        proposer,
+        proposed_at: env.ledger().timestamp(),
+        votes: Map::new(env),
+    };
+    env.storage().temporary().set(&key, &ballot);
+    env.storage().temporary().extend_ttl(&key, BALLOT_TTL_THRESHOLD, BALLOT_TTL_LEDGERS);
+    crate::instance::bump_instance_ttl(env);
+    Ok(())
 }
 
 fn _next_proposal_id(env: &Env) -> u64 {
     let current: u64 = env
         .storage()
-        .instance()
-        .get(&GOV_PROPOSAL_COUNTER_KEY)
-        .unwrap_or(0u64);
-    let next = current + 1;
-    env.storage()
-        .instance()
-        .set(&GOV_PROPOSAL_COUNTER_KEY, &next);
-    next
+        .temporary()
+        .get(&key)
+        .ok_or(ContractError::NoActiveProposal)?;
+    if ballot.votes.contains_key(voter.clone()) {
+        return Err(ContractError::AlreadyVoted);
+    }
+    ballot.votes.set(voter, ());
+    env.storage().temporary().set(&key, &ballot);
+    env.storage().temporary().extend_ttl(&key, BALLOT_TTL_THRESHOLD, BALLOT_TTL_LEDGERS);
+    crate::instance::bump_instance_ttl(env);
+    Ok(ballot)
 }
 
 /// The cancellation quorum is the number of distinct signer votes required
@@ -295,18 +332,9 @@ pub fn cancellation_threshold(signer_count: u32) -> u32 {
     if signer_count < 2 { 1 } else { signer_count / 2 + 1 }
 }
 
-/// Return the cancellation threshold based on the current signer set
-/// stored under the given signers key.
-pub fn _cancellation_threshold_for_signers(
-    env: &Env,
-    signers_key: &Symbol,
-) -> u32 {
-    let signers: Map<Address, ()> = env
-        .storage()
-        .instance()
-        .get(signers_key)
-        .unwrap_or_else(|| Map::new(env));
-    cancellation_threshold(signers.len())
+pub fn close_ballot(env: &Env, proposal_id: Symbol) {
+    env.storage().temporary().remove(&BallotKey::Proposal(proposal_id));
+    crate::instance::bump_instance_ttl(env);
 }
 
 fn _cancellation_threshold(env: &Env) -> u32 {
