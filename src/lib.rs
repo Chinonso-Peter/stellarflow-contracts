@@ -64,6 +64,7 @@ pub fn asset_id_to_symbol(asset_id: u32) -> Symbol {
 pub(crate) mod nonce;
 use crate::nonce::{consume_nonce, get_nonce};
 
+pub mod action_guard;
 pub mod amm;
 pub mod admin;
 pub mod auth;
