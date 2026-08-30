@@ -67,10 +67,13 @@ pub fn asset_id_to_symbol(asset_id: u32) -> Symbol {
 pub(crate) mod nonce;
 use crate::nonce::{consume_nonce, get_nonce};
 
+pub mod action_guard;
+pub mod amm;
 pub mod admin;
 pub mod amm;
 pub mod auth;
 pub mod bridge;
+pub mod escrow;
 pub mod config;
 pub mod consensus;
 pub mod kernel;
@@ -90,19 +93,17 @@ pub mod settlement;
 pub mod slashing;
 pub mod staging;
 pub mod staking_tiers;
+pub mod router;
+pub mod settlement;
+pub mod state_verification;
 pub mod storage;
 pub mod temp_governance;
 pub mod upgrades;
 pub mod validation;
-pub mod vaults;
-pub mod zk;
-
-pub use admin::prune::PruneTarget;
-pub use config::{get_price_variance_config, set_price_variance_config, PriceVarianceConfig};
-pub use events::swaps::{publish_swap_executed, SwapExecutedEvent};
-pub use staking_tiers::{AssetFeedMetrics, StakingTier, StakingTierConfig};
-
-use crate::events::events::{emit_simple2, EV_UPGRADE_PROPOSED};
+pub use state_verification::{
+    assert_contract_state_sanity, verify_contract_state, verify_storage_ttl_bumps,
+    verify_zero_loss_accounting,
+};
 use crate::governance::{
     calculate_collected_weight, cast_vote, close_ballot, get_ballot, get_multisig_config,
     open_ballot, verify_staged_delay, verify_upgrade_quorum, GovernanceUpgradeProposal,
@@ -174,224 +175,77 @@ pub enum ContractError {
     InsufficientBondForPenalty = 46,
     SlippageExceeded = 47,
     AmountTooLow = 48,
-    NullifierAlreadyUsed = 49,
-    InvalidProof = 50,
-    BridgeAssetNotRegistered = 51,
-    BridgeInvalidMaxSupply = 52,
-    BridgeAssetAlreadyRegistered = 53,
-    BridgeInvalidAmount = 54,
-    BridgeNotController = 55,
-    BridgeSupplyCapExceeded = 56,
-    BridgeInsufficientBalance = 57,
-    BridgeEscrowNotConfigured = 58,
-    ReentrancyDetected = 59,
-    UpgradeHealthCheckFailed = 60,
-    MathOverflow = 61,
-    EventTopicLimitExceeded = 62,
-    OrderZeroAmount = 63,
-    OrderInvalidPrice = 64,
-    OrderNotFound = 65,
-    OrderAlreadyClosed = 66,
-    OrderInsufficientRemaining = 67,
-    OrderNotMaker = 68,
-    HtlcNotFound = 69,
-    HtlcNotActive = 70,
-    InvalidPreImage = 71,
-    DeadlineReached = 72,
-    DeadlineNotReached = 73,
-    DeadlineTooSoon = 74,
-    DeadlineTooFar = 75,
-    TooManyActiveHtlcs = 76,
-    InvalidInput = 77,
-    InvalidArgument = 78,
-    InvalidDivisionFactor = 79,
-    InvalidTickSpacing = 80,
-    TickIndexAlreadyExists = 81,
-    TickIndexNotFound = 82,
-    TickNotAligned = 83,
-    TickOutOfBounds = 84,
-    TooManyTicks = 85,
-    PoolNotFound = 86,
-    ZeroSwapAmount = 87,
-    EmptyRoute = 88,
-    InconsistentRouteAssets = 89,
-    RouteExecutionFailed = 90,
-    RouteTooLong = 91,
-    RoleNotFound = 92,
-    RoleExpiredOrMissing = 93,
-    RoleExpirationInPast = 94,
-    RollbackWindowExpired = 95,
-    NoPreviousUpgrade = 96,
-    StagingNotAuthorized = 97,
-    StaleData = 98,
-    RecoveryKeyNotConfigured = 99,
-    RecoveryNotAvailableYet = 100,
-    EmergencyRevocationAlreadyActive = 101,
-    VaultNotInitialized = 102,
-    VaultAlreadyInitialized = 103,
-    VaultInvalidPerformanceFee = 104,
-    VaultZeroAmount = 105,
-    VaultInsufficientShares = 106,
-    VaultInsufficientBalance = 107,
-    VaultPaused = 108,
-    NotEmergencyAdmin = 109,
-    NotRecoveryKey = 110,
+    NullifierAlreadyUsed = 48,
+    InvalidProof = 49,
+    BridgeAssetNotRegistered = 50,
+    BridgeInvalidMaxSupply = 51,
+    BridgeAssetAlreadyRegistered = 52,
+    BridgeInvalidAmount = 53,
+    BridgeNotController = 54,
+    BridgeSupplyCapExceeded = 55,
+    BridgeInsufficientBalance = 56,
+    BridgeEscrowNotConfigured = 57,
+    /// Reentrancy guard detected a reentrant call during execution.
+    ReentrancyDetected = 58,
+    MerkleTreeFull = 59,
+    NotSecurityCouncil = 60,
+    ProposalNotFound = 61,
+    ProposalNotVetoable = 62,
+    ProposalAlreadyVetoed = 63,
 }
 
-impl From<ContractError> for soroban_sdk::Error {
-    fn from(e: ContractError) -> Self {
-        soroban_sdk::Error::from_contract_error(e as u32)
-    }
-}
-
-impl From<&ContractError> for soroban_sdk::Error {
-    fn from(e: &ContractError) -> Self {
-        soroban_sdk::Error::from_contract_error(*e as u32)
-    }
-}
-
-impl TryFrom<soroban_sdk::Error> for ContractError {
-    type Error = soroban_sdk::InvokeError;
-    fn try_from(err: soroban_sdk::Error) -> Result<Self, Self::Error> {
-        if !err.is_type(soroban_sdk::xdr::ScErrorType::Contract) {
-            return Err(soroban_sdk::InvokeError::Abort);
-        }
-        let code = err.get_code();
-        match code {
-            1 => Ok(ContractError::AlreadyInitialized),
-            2 => Ok(ContractError::NotInitialized),
-            3 => Ok(ContractError::NotAdmin),
-            4 => Ok(ContractError::NoPendingUpgrade),
-            5 => Ok(ContractError::UpgradeTimelockNotSatisfied),
-            6 => Ok(ContractError::InvalidHeartbeatInterval),
-            7 => Ok(ContractError::InvalidNonce),
-            8 => Ok(ContractError::AlreadyRegistered),
-            9 => Ok(ContractError::NotRegistered),
-            10 => Ok(ContractError::InvalidStakeAmount),
-            11 => Ok(ContractError::Overflow),
-            12 => Ok(ContractError::Unauthorized),
-            13 => Ok(ContractError::TargetNotAdmin),
-            14 => Ok(ContractError::ProposalAlreadyActive),
-            15 => Ok(ContractError::NoActiveProposal),
-            16 => Ok(ContractError::AlreadyVoted),
-            17 => Ok(ContractError::ThresholdNotReached),
-            18 => Ok(ContractError::SignatureExpired),
-            19 => Ok(ContractError::InvalidSaltSignature),
-            20 => Ok(ContractError::InsufficientStakeForTier),
-            21 => Ok(ContractError::InvalidTierConfig),
-            22 => Ok(ContractError::FeedAlreadyRegistered),
-            23 => Ok(ContractError::PremiumPoolAccessDenied),
-            24 => Ok(ContractError::TransferAlreadyPending),
-            25 => Ok(ContractError::NoPendingOwner),
-            26 => Ok(ContractError::FeeCeilingExceeded),
-            27 => Ok(ContractError::DivisionByZero),
-            28 => Ok(ContractError::StaleSequence),
-            29 => Ok(ContractError::InvalidVarianceConfig),
-            30 => Ok(ContractError::StaleTelemetryPayload),
-            31 => Ok(ContractError::InsufficientReserveBalance),
-            32 => Ok(ContractError::InsufficientVolume),
-            33 => Ok(ContractError::InsufficientLiquidityDepth),
-            34 => Ok(ContractError::ContractPaused),
-            35 => Ok(ContractError::RevokedAddress),
-            36 => Ok(ContractError::EmergencyRevocationActive),
-            37 => Ok(ContractError::NoActiveEmergencyRevocation),
-            38 => Ok(ContractError::BundleAssetLimitExceeded),
-            39 => Ok(ContractError::BundleValidationFailed),
-            40 => Ok(ContractError::IncompleteQuorum),
-            41 => Ok(ContractError::EpochClosed),
-            42 => Ok(ContractError::AdminChangePending),
-            43 => Ok(ContractError::NoAdminChangePending),
-            44 => Ok(ContractError::CosignerCannotBeProposer),
-            45 => Ok(ContractError::AdminTimelockNotSatisfied),
-            46 => Ok(ContractError::InsufficientBondForPenalty),
-            47 => Ok(ContractError::SlippageExceeded),
-            48 => Ok(ContractError::AmountTooLow),
-            49 => Ok(ContractError::NullifierAlreadyUsed),
-            50 => Ok(ContractError::InvalidProof),
-            51 => Ok(ContractError::BridgeAssetNotRegistered),
-            52 => Ok(ContractError::BridgeInvalidMaxSupply),
-            53 => Ok(ContractError::BridgeAssetAlreadyRegistered),
-            54 => Ok(ContractError::BridgeInvalidAmount),
-            55 => Ok(ContractError::BridgeNotController),
-            56 => Ok(ContractError::BridgeSupplyCapExceeded),
-            57 => Ok(ContractError::BridgeInsufficientBalance),
-            58 => Ok(ContractError::BridgeEscrowNotConfigured),
-            59 => Ok(ContractError::ReentrancyDetected),
-            60 => Ok(ContractError::UpgradeHealthCheckFailed),
-            61 => Ok(ContractError::MathOverflow),
-            62 => Ok(ContractError::EventTopicLimitExceeded),
-            63 => Ok(ContractError::OrderZeroAmount),
-            64 => Ok(ContractError::OrderInvalidPrice),
-            65 => Ok(ContractError::OrderNotFound),
-            66 => Ok(ContractError::OrderAlreadyClosed),
-            67 => Ok(ContractError::OrderInsufficientRemaining),
-            68 => Ok(ContractError::OrderNotMaker),
-            69 => Ok(ContractError::HtlcNotFound),
-            70 => Ok(ContractError::HtlcNotActive),
-            71 => Ok(ContractError::InvalidPreImage),
-            72 => Ok(ContractError::DeadlineReached),
-            73 => Ok(ContractError::DeadlineNotReached),
-            74 => Ok(ContractError::DeadlineTooSoon),
-            75 => Ok(ContractError::DeadlineTooFar),
-            76 => Ok(ContractError::TooManyActiveHtlcs),
-            77 => Ok(ContractError::InvalidInput),
-            78 => Ok(ContractError::InvalidArgument),
-            79 => Ok(ContractError::InvalidDivisionFactor),
-            80 => Ok(ContractError::InvalidTickSpacing),
-            81 => Ok(ContractError::TickIndexAlreadyExists),
-            82 => Ok(ContractError::TickIndexNotFound),
-            83 => Ok(ContractError::TickNotAligned),
-            84 => Ok(ContractError::TickOutOfBounds),
-            85 => Ok(ContractError::TooManyTicks),
-            86 => Ok(ContractError::PoolNotFound),
-            87 => Ok(ContractError::ZeroSwapAmount),
-            88 => Ok(ContractError::EmptyRoute),
-            89 => Ok(ContractError::InconsistentRouteAssets),
-            90 => Ok(ContractError::RouteExecutionFailed),
-            91 => Ok(ContractError::RouteTooLong),
-            92 => Ok(ContractError::RoleNotFound),
-            93 => Ok(ContractError::RoleExpiredOrMissing),
-            94 => Ok(ContractError::RoleExpirationInPast),
-            95 => Ok(ContractError::RollbackWindowExpired),
-            96 => Ok(ContractError::NoPreviousUpgrade),
-            97 => Ok(ContractError::StagingNotAuthorized),
-            98 => Ok(ContractError::StaleData),
-            99 => Ok(ContractError::RecoveryKeyNotConfigured),
-            100 => Ok(ContractError::RecoveryNotAvailableYet),
-            101 => Ok(ContractError::EmergencyRevocationAlreadyActive),
-            102 => Ok(ContractError::VaultNotInitialized),
-            103 => Ok(ContractError::VaultAlreadyInitialized),
-            104 => Ok(ContractError::VaultInvalidPerformanceFee),
-            105 => Ok(ContractError::VaultZeroAmount),
-            106 => Ok(ContractError::VaultInsufficientShares),
-            107 => Ok(ContractError::VaultInsufficientBalance),
-            108 => Ok(ContractError::VaultPaused),
-            109 => Ok(ContractError::NotEmergencyAdmin),
-            110 => Ok(ContractError::NotRecoveryKey),
-            _ => Err(soroban_sdk::InvokeError::Abort),
-        }
-    }
-}
-
-impl soroban_sdk::TryFromVal<soroban_sdk::Env, soroban_sdk::Val> for ContractError {
-    type Error = soroban_sdk::ConversionError;
-    fn try_from_val(env: &soroban_sdk::Env, val: &soroban_sdk::Val) -> Result<Self, Self::Error> {
-        let err = soroban_sdk::Error::try_from_val(env, val)?;
-        Self::try_from(err).map_err(|_| soroban_sdk::ConversionError)
-    }
-}
-
-impl soroban_sdk::IntoVal<soroban_sdk::Env, soroban_sdk::Val> for ContractError {
-    fn into_val(&self, env: &soroban_sdk::Env) -> soroban_sdk::Val {
-        let err: soroban_sdk::Error = (*self).into();
-        err.into_val(env)
-    }
-}
-
-impl soroban_sdk::IntoVal<soroban_sdk::Env, soroban_sdk::Val> for &ContractError {
-    fn into_val(&self, env: &soroban_sdk::Env) -> soroban_sdk::Val {
-        (*self).into_val(env)
-    }
+impl ContractError {
+    pub const MathOverflow: Self = Self::Overflow;
+    pub const BridgeAssetNotRegistered: Self = Self::NotRegistered;
+    pub const BridgeInvalidMaxSupply: Self = Self::Overflow;
+    pub const BridgeAssetAlreadyRegistered: Self = Self::AlreadyRegistered;
+    pub const BridgeInvalidAmount: Self = Self::AmountTooLow;
+    pub const BridgeNotController: Self = Self::Unauthorized;
+    pub const BridgeSupplyCapExceeded: Self = Self::Overflow;
+    pub const BridgeInsufficientBalance: Self = Self::Overflow;
+    pub const BridgeEscrowNotConfigured: Self = Self::NotInitialized;
+    pub const AdminChangeTimelockNotSatis: Self = Self::UpgradeTimelockNotSatisfied;
+    pub const UpgradeHealthCheckFailed: Self = Self::UpgradeTimelockNotSatisfied;
+    pub const DeadlineTooSoon: Self = Self::UpgradeTimelockNotSatisfied;
+    pub const DeadlineTooFar: Self = Self::UpgradeTimelockNotSatisfied;
+    pub const DeadlineReached: Self = Self::UpgradeTimelockNotSatisfied;
+    pub const DeadlineNotReached: Self = Self::UpgradeTimelockNotSatisfied;
+    pub const TooManyActiveHtlcs: Self = Self::Overflow;
+    pub const HtlcNotFound: Self = Self::NotRegistered;
+    pub const HtlcNotActive: Self = Self::Unauthorized;
+    pub const InvalidPreImage: Self = Self::InvalidSaltSignature;
+    pub const NotEmergencyAdmin: Self = Self::NotAdmin;
+    pub const NoPreviousUpgrade: Self = Self::NotRegistered;
+    pub const RollbackWindowExpired: Self = Self::UpgradeTimelockNotSatisfied;
+    pub const RouteExecutionFailed: Self = Self::Unauthorized;
+    pub const ZeroSwapAmount: Self = Self::AmountTooLow;
+    pub const PoolNotFound: Self = Self::NotRegistered;
+    pub const InvalidArgument: Self = Self::NotInitialized;
+    pub const EventTopicLimitExceeded: Self = Self::Overflow;
+    pub const RecoveryKeyNotConfigured: Self = Self::NotInitialized;
+    pub const NotRecoveryKey: Self = Self::Unauthorized;
+    pub const RecoveryNotAvailableYet: Self = Self::UpgradeTimelockNotSatisfied;
+    pub const StagingNotAuthorized: Self = Self::Unauthorized;
+    pub const EmptyRoute: Self = Self::AmountTooLow;
+    pub const RouteTooLong: Self = Self::Overflow;
+    pub const InconsistentRouteAssets: Self = Self::NotInitialized;
+    pub const VaultZeroAmount: Self = Self::AmountTooLow;
+    pub const VaultInsufficientShares: Self = Self::Overflow;
+    pub const VaultInsufficientBalance: Self = Self::Overflow;
+    pub const VaultAlreadyInitialized: Self = Self::AlreadyInitialized;
+    pub const VaultNotInitialized: Self = Self::NotInitialized;
+    pub const VaultPaused: Self = Self::ContractPaused;
+    pub const VaultInvalidPerformanceFee: Self = Self::InvalidVarianceConfig;
+    pub const OrderNotFound: Self = Self::NotRegistered;
+    pub const OrderZeroAmount: Self = Self::AmountTooLow;
+    pub const OrderInvalidPrice: Self = Self::NotInitialized;
+    pub const OrderAlreadyClosed: Self = Self::Unauthorized;
+    pub const OrderInsufficientRemaining: Self = Self::Overflow;
+    pub const OrderNotMaker: Self = Self::Unauthorized;
+    pub const RoleExpirationInPast: Self = Self::UpgradeTimelockNotSatisfied;
+    pub const RoleNotFound: Self = Self::NotRegistered;
+    pub const UnauthorizedReentryAttempt: Self = Self::Unauthorized;
+    pub const RoleExpiredOrMissing: Self = Self::Unauthorized;
 }
 
 // Contract state keys
@@ -412,7 +266,8 @@ const PLATFORM_CAPITAL_KEY: Symbol = symbol_short!("CAPITAL");
 pub(crate) const CONSENSUS_CACHE_KEY: Symbol = symbol_short!("CACHE");
 const RELAYER_TTL_THRESHOLD: u32 = 5_000;
 const INSTANCE_TTL_EXTEND: u32 = 100_000;
-const TREASURY_KEY: Symbol = symbol_short!("TREASURY");
+pub(crate) const TREASURY_KEY: Symbol = symbol_short!("TREASURY");
+pub(crate) const LP_REWARD_POOL_KEY: Symbol = symbol_short!("LPREWARD");
 const SEQUENCE_COUNTER_KEY: Symbol = symbol_short!("SEQCTR");
 const REVOCATION_KEY: Symbol = symbol_short!("REVOKE");
 const RECOVERY_KEY: Symbol = symbol_short!("RKEY");
@@ -485,6 +340,19 @@ impl TimeLockedUpgradeContract {
 
 #[contractimpl]
 impl TimeLockedUpgradeContract {
+    /// Atomically consume a nullifier for a private transfer.
+    ///
+    /// The persistent key is checked and written in this invocation, so a
+    /// replay returns before any caller-supplied transfer side effect runs.
+    pub fn consume_private_transfer_nullifier(
+        env: Env,
+        caller: Address,
+        nullifier: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        crate::zk::nullifier::register_nullifier(&env, nullifier)
+    }
+
     pub fn initialize(env: Env, admin: Address, treasury: Address) -> Result<(), ContractError> {
         let _dummy: soroban_sdk::Error = soroban_sdk::Error::from_contract_error(1);
         ensure_schema_version(&env)?;
@@ -604,6 +472,18 @@ impl TimeLockedUpgradeContract {
 
     pub fn get_data(env: Env) -> Result<ContractData, ContractError> {
         Self::load_data(&env)
+    }
+
+    pub fn verify_storage_ttl(env: Env) -> Result<(), ContractError> {
+        verify_storage_ttl_bumps(&env)
+    }
+
+    pub fn verify_zero_loss(env: Env) -> Result<(), ContractError> {
+        verify_zero_loss_accounting(&env)
+    }
+
+    pub fn verify_contract_state(env: Env) -> Result<(), ContractError> {
+        verify_contract_state(&env)
     }
 
     pub fn propose_upgrade(
@@ -830,7 +710,7 @@ impl TimeLockedUpgradeContract {
     }
 
     pub fn is_data_fresh(env: Env, asset: AssetId) -> bool {
-        let heartbeat_key = HeartbeatKey::HeartbeatByAsset(asset);
+        let heartbeat_key = storage::HeartbeatKey::HeartbeatByAsset(asset);
         if let Some(last_update) = env.storage().temporary().get::<_, u64>(&heartbeat_key) {
             env.ledger().timestamp().saturating_sub(last_update) <= Self::_get_interval(&env)
         } else {
@@ -873,6 +753,86 @@ impl TimeLockedUpgradeContract {
     }
     pub fn get_corridor_fee_pool(env: Env, asset: AssetId) -> fees::CorridorFeePool {
         crate::fees::get_corridor_fee_pool(env, asset)
+    }
+
+    pub fn record_lp_fee(
+        env: Env,
+        admin: Address,
+        asset: AssetId,
+        fee_amount: u64,
+    ) -> Result<settlement::fees::LiquidityPool, ContractError> {
+        settlement::fees::record_fee(&env, admin, asset, fee_amount)
+    }
+
+    pub fn add_lp_liquidity(
+        env: Env,
+        provider: Address,
+        asset: AssetId,
+        reserve_a: u128,
+        reserve_b: u128,
+        lp_units: u64,
+    ) -> Result<settlement::fees::LiquidityPosition, ContractError> {
+        settlement::fees::add_liquidity(
+            &env,
+            provider,
+            asset,
+            reserve_a,
+            reserve_b,
+            lp_units,
+        )
+    }
+
+    pub fn redeem_lp_liquidity(
+        env: Env,
+        provider: Address,
+        asset: AssetId,
+        lp_units: u64,
+    ) -> Result<settlement::fees::RedemptionResult, ContractError> {
+        settlement::fees::redeem_liquidity(&env, provider, asset, lp_units)
+    }
+
+    pub fn get_lp_pool(env: Env, asset: AssetId) -> settlement::fees::LiquidityPool {
+        settlement::fees::get_pool(&env, asset)
+    }
+
+    pub fn get_lp_position(
+        env: Env,
+        asset: AssetId,
+        provider: Address,
+    ) -> Option<settlement::fees::LiquidityPosition> {
+        settlement::fees::get_position(&env, asset, provider)
+    }
+
+    /// Record flash loan fee revenue for an asset.
+    pub fn record_flash_fee(
+        env: Env,
+        asset: AssetId,
+        fee_amount: u64,
+    ) -> Result<u64, ContractError> {
+        fees::record_flash_fee(&env, asset, fee_amount)
+    }
+
+    /// Query the flash loan fee pool status for an asset.
+    pub fn get_flash_fee_pool(env: Env, asset: AssetId) -> fees::FlashLoanFeePool {
+        fees::get_flash_fee_pool(&env, asset)
+    }
+
+    /// Set the LP reward pool destination address for flash fee distributions.
+    pub fn set_lp_reward_pool(
+        env: Env,
+        admin: Address,
+        lp_reward_pool: Address,
+    ) -> Result<(), ContractError> {
+        fees::set_lp_reward_pool(&env, &admin, lp_reward_pool)
+    }
+
+    /// Distribute accumulated flash loan service fees (50% to LP reward pool and 50% to DAO treasury).
+    pub fn distribute_flash_fees(
+        env: Env,
+        caller: Address,
+        asset: AssetId,
+    ) -> Result<(u64, u64), ContractError> {
+        fees::distribute_flash_fees(&env, &caller, asset)
     }
 
     /// Get the current dynamic trading fee for an asset (in basis points)
@@ -1264,6 +1224,73 @@ impl TimeLockedUpgradeContract {
         admin::has_active_emergency_revocation(&env)
     }
 
+    // ── Governance Proposal Veto Engine (Issue #769) ────────────────────────────
+    // 
+    // Emergency veto control allowing the designated Security Council multi-sig
+    // address to cancel malicious or dangerous proposals during their timelock
+    // windows, providing a last-resort circuit-breaker mechanism.
+
+    /// Configure the Security Council address that has authority to veto proposals.
+    ///
+    /// Only the current admin may set the Security Council. Once configured,
+    /// this multi-sig address gains exclusive authority to veto any proposal.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - The caller (must be the contract admin)
+    /// * `council` - The Security Council multi-sig address
+    ///
+    /// # Errors
+    /// - [`ContractError::NotAdmin`] if the caller is not the contract admin
+    /// - [`ContractError::NotInitialized`] if the contract is not initialized
+    pub fn set_security_council(env: Env, caller: Address, council: Address) -> Result<(), ContractError> {
+        veto::set_security_council(&env, caller, council)
+    }
+
+    /// Retrieve the current Security Council address, if configured.
+    pub fn get_security_council(env: Env) -> Option<Address> {
+        veto::get_security_council(&env)
+    }
+
+    /// Veto an active proposal, instantly transitioning it to `Vetoed` state.
+    ///
+    /// Only the designated Security Council may invoke this function. Upon veto:
+    /// 1. The proposal is marked as vetoed
+    /// 2. Execution payload is invalidated
+    /// 3. Audit trail is recorded with reason hash
+    /// 4. `ProposalVetoed` event is emitted
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - The address attempting the veto (must be Security Council)
+    /// * `proposal_id` - The ID of the proposal to veto
+    /// * `reason` - Audit reason string (logged as hash for transparency)
+    ///
+    /// # Errors
+    /// - [`ContractError::NotSecurityCouncil`] if the caller is not the Security Council
+    /// - [`ContractError::ProposalNotFound`] if the proposal does not exist
+    /// - [`ContractError::ProposalAlreadyVetoed`] if the proposal is already vetoed
+    pub fn veto_proposal(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+        reason: soroban_sdk::String,
+    ) -> Result<(), ContractError> {
+        veto::veto_proposal(&env, caller, proposal_id, reason)
+    }
+
+    /// Retrieve the veto record for a proposal, if it has been vetoed.
+    ///
+    /// Returns None if the proposal has not been vetoed.
+    pub fn get_veto_record(env: Env, proposal_id: u64) -> Option<veto::ProposalVeto> {
+        veto::get_veto_record(&env, proposal_id)
+    }
+
+    /// Check if a proposal has been vetoed.
+    pub fn is_proposal_vetoed(env: Env, proposal_id: u64) -> bool {
+        veto::is_proposal_vetoed(&env, proposal_id)
+    }
+
     // ── Multi-Tier Escrow Penalties (Issue #525) ──────────────────────────────
     // ── Dead-Man's Switch Recovery (Issue #617) ──────────────────────────
 
@@ -1348,32 +1375,6 @@ impl TimeLockedUpgradeContract {
 )?;
         Ok(result)
     }
-       
-    pub fn update_validator_profile(env: Env, node: Address, pool: Symbol) -> Result<(), ContractError> {
-        admin::assert_not_revoked(&env, &node)?;
-        node.require_auth();
-        check_bond_capacity(&env, &node, &pool)?;
-        let asset_id = symbol_to_asset_id(&pool);
-        check_liquidity_depth(&env, asset_id)?;
-        storage::update_feed_stake_activity(&env, node.clone(), asset_id);
-        Self::_record_heartbeat(&env, asset_id);
-        Ok(())
-    }
-
-    pub fn submit_telemetry_data(
-        env: Env, node: Address, pool: Symbol,
-        payload_timestamp: u64, reserve_a: i128, reserve_b: i128, volume_24h: i128,
-    ) -> Result<(), ContractError> {
-        admin::assert_not_revoked(&env, &node)?;
-        node.require_auth();
-        validate_telemetry_submission(&env, &node, &pool, payload_timestamp, reserve_a, reserve_b, volume_24h)?;
-        Self::_record_heartbeat(&env, symbol_to_asset_id(&pool));
-        env.events().publish(
-            (soroban_sdk::symbol_short!("telem_ok"),),
-            (node, pool, payload_timestamp),
-        );
-        Ok(())
-    }
 
     // ── Revocable admin role delegation with expiration (Issue #703) ────────
 
@@ -1433,6 +1434,13 @@ impl TimeLockedUpgradeContract {
         vaults::autocompound::harvest(&env, keeper, yield_amount)
     }
 
+    pub fn vault_flash_loan(
+        env: Env, borrower: Address, amount: i128,
+    ) -> Result<i128, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::autocompound::flash_loan(&env, borrower, amount)
+    }
+
     pub fn vault_total_assets(env: Env) -> i128 {
         vaults::autocompound::get_total_assets(&env)
     }
@@ -1445,8 +1453,87 @@ impl TimeLockedUpgradeContract {
         vaults::autocompound::get_share_balance(&env, holder)
     }
 
+    /// Evaluate a vault liquidation against verified TWAP prices from the
+    /// oracle. Liquidation is allowed below 110% collateralization and
+    /// allocates 5% of confiscated collateral to the liquidator.
+    pub fn vault_liquidation_quote(
+        env: Env,
+        oracle: Address,
+        collateral_asset: Symbol,
+        debt_asset: Symbol,
+        position: vaults::liquidation::VaultPosition,
+        purchase_collateral: u128,
+    ) -> Result<vaults::liquidation::LiquidationResult, ContractError> {
+        vaults::liquidation::liquidate_at_twap(
+            &env,
+            &oracle,
+            &collateral_asset,
+            &debt_asset,
+            &position,
+            purchase_collateral,
+        )
+    }
+
     pub fn vault_config(env: Env) -> Option<vaults::autocompound::VaultConfig> {
         vaults::autocompound::get_config(&env)
+    }
+
+    pub fn init_yield_farming(
+        env: Env,
+        admin: Address,
+        lp_token: Address,
+        reward_token: Address,
+        emission_per_ledger: i128,
+    ) -> Result<vaults::lp_farming::FarmingConfig, ContractError> {
+        vaults::lp_farming::initialize(
+            &env,
+            admin,
+            lp_token,
+            reward_token,
+            emission_per_ledger,
+        )
+    }
+
+    pub fn fund_yield_rewards(
+        env: Env,
+        funder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        vaults::lp_farming::fund_rewards(&env, funder, amount)
+    }
+
+    pub fn stake_lp(env: Env, user: Address, amount: i128) -> Result<i128, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::lp_farming::stake(&env, user, amount)
+    }
+
+    pub fn claim_rewards(env: Env, user: Address) -> Result<i128, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::lp_farming::claim_rewards(&env, user)
+    }
+
+    pub fn exit_yield_farming(
+        env: Env,
+        user: Address,
+    ) -> Result<(i128, i128), ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::lp_farming::exit(&env, user)
+    }
+
+    pub fn set_emission_multiplier(
+        env: Env,
+        governance: Address,
+        multiplier: u32,
+    ) -> Result<vaults::lp_farming::FarmingConfig, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::lp_farming::set_emission_multiplier(&env, governance, multiplier)
+    }
+
+    pub fn pending_yield_rewards(
+        env: Env,
+        user: Address,
+    ) -> Result<i128, ContractError> {
+        vaults::lp_farming::pending_rewards(&env, user)
     }
 
     // ── On-chain limit order book (Issue #701) ───────────────────────────────
@@ -1458,6 +1545,25 @@ impl TimeLockedUpgradeContract {
         orders::limit::place_order(&env, maker, pair, price_tick, sell_amount)
     }
 
+    pub fn place_limit_order_with_expiry(
+        env: Env,
+        maker: Address,
+        pair: orders::limit::AssetPair,
+        price_tick: i128,
+        sell_amount: i128,
+        expiry: u32,
+    ) -> Result<orders::limit::LimitOrder, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::place_order_with_expiry(
+            &env,
+            maker,
+            pair,
+            price_tick,
+            sell_amount,
+            expiry,
+        )
+    }
+
     pub fn fill_limit_order(
         env: Env, filler: Address, order_id: u64, fill_amount: i128,
     ) -> Result<orders::limit::FillResult, ContractError> {
@@ -1465,9 +1571,17 @@ impl TimeLockedUpgradeContract {
         orders::limit::fill_order(&env, filler, order_id, fill_amount)
     }
 
+    pub fn match_limit_orders(
+        env: Env, seller_order_id: u64, buyer_order_id: u64, fill_amount: i128,
+    ) -> Result<orders::limit::SettlementResult, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::match_orders(&env, seller_order_id, buyer_order_id, fill_amount)
+    }
+
     /// Cancel a still-open order and return its unfilled balance to the maker.
     pub fn cancel_limit_order(env: Env, maker: Address, order_id: u64) -> Result<i128, ContractError> {
         let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        maker.require_auth();
         orders::limit::cancel_order(&env, maker, order_id)
     }
 
@@ -1477,6 +1591,17 @@ impl TimeLockedUpgradeContract {
 
     pub fn get_orders_at_tick(env: Env, pair: orders::limit::AssetPair, price_tick: i128) -> Vec<u64> {
         orders::limit::get_orders_at_tick(&env, pair, price_tick)
+    }
+
+    pub fn get_order_balance(env: Env, owner: Address, asset: Address) -> i128 {
+        orders::limit::get_balance(&env, owner, asset)
+    }
+
+    pub fn withdraw_order_balance(
+        env: Env, owner: Address, asset: Address, amount: i128,
+    ) -> Result<i128, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::withdraw_balance(&env, owner, asset, amount)
     }
 
     // ── Multi-hop Route Swaps ───────────────────────────────────────────────
@@ -1528,6 +1653,27 @@ impl TimeLockedUpgradeContract {
         bridge::mint::get_config(&env, asset_code)
     }
 
+    pub fn set_wrapped_mint_rate_limit(
+        env: Env,
+        admin: Address,
+        asset_code: Symbol,
+        max_rolling_amount: i128,
+    ) -> Result<bridge::rate_limit::MintRateLimit, ContractError> {
+        bridge::rate_limit::set_limit(
+            &env,
+            admin,
+            bridge::rate_limit::RateLimitAsset::Wrapped(asset_code),
+            max_rolling_amount,
+        )
+    }
+
+    pub fn get_wrapped_mint_rate_limit(
+        env: Env,
+        asset_code: Symbol,
+    ) -> Option<bridge::rate_limit::MintRateLimit> {
+        bridge::rate_limit::get_limit(&env, bridge::rate_limit::RateLimitAsset::Wrapped(asset_code))
+    }
+
     // --- Native bridge escrow (Issue #750) ---
 
     pub fn configure_bridge_escrow(
@@ -1564,7 +1710,35 @@ impl TimeLockedUpgradeContract {
         bridge::escrow::get_config(&env)
     }
 
+    // --- Private remittance commitment tree ---
+
+    pub fn insert_commitment(
+        env: Env, commitment: BytesN<32>,
+    ) -> Result<(u64, BytesN<32>), ContractError> {
+        escrow::merkle::insert(&env, commitment)
+    }
+
+    pub fn commitment_root(env: Env) -> BytesN<32> {
+        escrow::merkle::current_root(&env)
+    }
+
+    pub fn commitment_next_index(env: Env) -> u64 {
+        escrow::merkle::next_index(&env)
+    }
+
+    pub fn is_known_commitment_root(env: Env, root: BytesN<32>) -> bool {
+        escrow::merkle::is_known_root(&env, root)
+    }
+
+    pub fn commitment_root_history(env: Env) -> Vec<BytesN<32>> {
+        escrow::merkle::root_history(&env)
+    }
+
     // --- Private Helpers ---
+
+    fn _extend_instance_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(RELAYER_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+    }
 
     fn assert_contract_is_active(env: &Env) -> Result<(), ContractError> {
         if !env.storage().instance().has(&DATA_KEY) {
@@ -1577,7 +1751,7 @@ impl TimeLockedUpgradeContract {
     }
 
     fn _record_heartbeat(env: &Env, asset: AssetId) {
-        let heartbeat_key = HeartbeatKey::HeartbeatByAsset(asset);
+        let heartbeat_key = storage::HeartbeatKey::HeartbeatByAsset(asset);
         env.storage().temporary().set(&heartbeat_key, &env.ledger().timestamp());
     }
 
