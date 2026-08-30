@@ -1497,6 +1497,7 @@ impl TimeLockedUpgradeContract {
     /// Cancel a still-open order and return its unfilled balance to the maker.
     pub fn cancel_limit_order(env: Env, maker: Address, order_id: u64) -> Result<i128, ContractError> {
         let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        maker.require_auth();
         orders::limit::cancel_order(&env, maker, order_id)
     }
 
