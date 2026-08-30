@@ -64,6 +64,8 @@ pub fn asset_id_to_symbol(asset_id: u32) -> Symbol {
 pub(crate) mod nonce;
 use crate::nonce::{consume_nonce, get_nonce};
 
+pub mod action_guard;
+pub mod amm;
 pub mod admin;
 pub mod amm;
 pub mod auth;
@@ -236,6 +238,7 @@ impl ContractError {
     pub const OrderNotMaker: Self = Self::Unauthorized;
     pub const RoleExpirationInPast: Self = Self::UpgradeTimelockNotSatisfied;
     pub const RoleNotFound: Self = Self::NotRegistered;
+    pub const UnauthorizedReentryAttempt: Self = Self::Unauthorized;
     pub const RoleExpiredOrMissing: Self = Self::Unauthorized;
 }
 
@@ -1352,6 +1355,27 @@ impl TimeLockedUpgradeContract {
         vaults::autocompound::get_share_balance(&env, holder)
     }
 
+    /// Evaluate a vault liquidation against verified TWAP prices from the
+    /// oracle. Liquidation is allowed below 110% collateralization and
+    /// allocates 5% of confiscated collateral to the liquidator.
+    pub fn vault_liquidation_quote(
+        env: Env,
+        oracle: Address,
+        collateral_asset: Symbol,
+        debt_asset: Symbol,
+        position: vaults::liquidation::VaultPosition,
+        purchase_collateral: u128,
+    ) -> Result<vaults::liquidation::LiquidationResult, ContractError> {
+        vaults::liquidation::liquidate_at_twap(
+            &env,
+            &oracle,
+            &collateral_asset,
+            &debt_asset,
+            &position,
+            purchase_collateral,
+        )
+    }
+
     pub fn vault_config(env: Env) -> Option<vaults::autocompound::VaultConfig> {
         vaults::autocompound::get_config(&env)
     }
@@ -1452,6 +1476,7 @@ impl TimeLockedUpgradeContract {
     /// Cancel a still-open order and return its unfilled balance to the maker.
     pub fn cancel_limit_order(env: Env, maker: Address, order_id: u64) -> Result<i128, ContractError> {
         let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        maker.require_auth();
         orders::limit::cancel_order(&env, maker, order_id)
     }
 

@@ -191,6 +191,9 @@ pub fn place_order_with_expiry(
     save_order(env, &order);
     bucket_push(env, &pair, price_tick, order.id);
 
+    let is_bid = pair.sell_asset > pair.buy_asset;
+    add_tick_liquidity(env, &pair, price_tick, sell_amount, is_bid);
+
     Ok(order)
 }
 
@@ -244,6 +247,9 @@ pub fn fill_order(env: &Env, filler: Address, order_id: u64, fill_amount: i128) 
     }
     save_order(env, &order);
 
+    let is_bid = order.pair.sell_asset > order.pair.buy_asset;
+    remove_tick_liquidity(env, &order.pair, order.price_tick, fill_amount, is_bid);
+
     env.events().publish(
         (soroban_sdk::symbol_short!("ord_fill"), order.id),
         (filler, fill_amount, paid_amount, order.remaining_amount),
@@ -278,6 +284,9 @@ pub fn cancel_order(env: &Env, maker: Address, order_id: u64) -> Result<i128, Co
     bucket_remove(env, &order.pair, order.price_tick, order.id);
     save_order(env, &order);
 
+    let is_bid = order.pair.sell_asset > order.pair.buy_asset;
+    remove_tick_liquidity(env, &order.pair, order.price_tick, recovered, is_bid);
+
     if recovered > 0 {
         let sell_client = token::Client::new(env, &order.pair.sell_asset);
         sell_client.transfer(&env.current_contract_address(), &maker, &recovered);
@@ -296,6 +305,114 @@ pub fn get_orders_at_tick(env: &Env, pair: AssetPair, price_tick: i128) -> Vec<u
         .persistent()
         .get(&OrderStorageKey::Bucket(pair, price_tick))
         .unwrap_or_else(|| Vec::new(env))
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LiquidityStorageKey {
+    ActiveTicks(AssetPair, bool),
+    TickVolume(AssetPair, i128, bool),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidityLevel {
+    pub price_tick: i128,
+    pub volume: i128,
+}
+
+pub fn add_tick_liquidity(env: &Env, pair: &AssetPair, price_tick: i128, amount: i128, is_bid: bool) {
+    if amount <= 0 {
+        return;
+    }
+    let vol_key = LiquidityStorageKey::TickVolume(pair.clone(), price_tick, is_bid);
+    let current_vol: i128 = env.storage().persistent().get(&vol_key).unwrap_or(0);
+    let new_vol = current_vol + amount;
+    env.storage().persistent().set(&vol_key, &new_vol);
+    env.storage().persistent().extend_ttl(&vol_key, crate::storage::PERSISTENT_TTL_THRESHOLD, crate::storage::PERSISTENT_TTL_THRESHOLD);
+
+    if current_vol == 0 {
+        let ticks_key = LiquidityStorageKey::ActiveTicks(pair.clone(), is_bid);
+        let mut ticks: Vec<i128> = env.storage().persistent().get(&ticks_key).unwrap_or_else(|| Vec::new(env));
+        ticks.push_back(price_tick);
+        
+        let mut temp_rust_vec = soroban_sdk::vec![env];
+        for t in ticks.iter() {
+            temp_rust_vec.push_back(t);
+        }
+        
+        let len = temp_rust_vec.len();
+        for i in 1..len {
+            let key_val = temp_rust_vec.get(i).unwrap();
+            let mut j = i;
+            if is_bid {
+                while j > 0 && temp_rust_vec.get(j - 1).unwrap() < key_val {
+                    temp_rust_vec.set(j, temp_rust_vec.get(j - 1).unwrap());
+                    j -= 1;
+                }
+            } else {
+                while j > 0 && temp_rust_vec.get(j - 1).unwrap() > key_val {
+                    temp_rust_vec.set(j, temp_rust_vec.get(j - 1).unwrap());
+                    j -= 1;
+                }
+            }
+            temp_rust_vec.set(j, key_val);
+        }
+
+        let mut sorted_ticks = Vec::new(env);
+        for t in temp_rust_vec.iter() {
+            sorted_ticks.push_back(t);
+        }
+        env.storage().persistent().set(&ticks_key, &sorted_ticks);
+        env.storage().persistent().extend_ttl(&ticks_key, crate::storage::PERSISTENT_TTL_THRESHOLD, crate::storage::PERSISTENT_TTL_THRESHOLD);
+    }
+}
+
+pub fn remove_tick_liquidity(env: &Env, pair: &AssetPair, price_tick: i128, amount: i128, is_bid: bool) {
+    if amount <= 0 {
+        return;
+    }
+    let vol_key = LiquidityStorageKey::TickVolume(pair.clone(), price_tick, is_bid);
+    let current_vol: i128 = env.storage().persistent().get(&vol_key).unwrap_or(0);
+    let new_vol = if current_vol <= amount { 0 } else { current_vol - amount };
+    
+    if new_vol == 0 {
+        env.storage().persistent().remove(&vol_key);
+        let ticks_key = LiquidityStorageKey::ActiveTicks(pair.clone(), is_bid);
+        if let Some(ticks) = env.storage().persistent().get::<_, Vec<i128>>(&ticks_key) {
+            let mut updated = Vec::new(env);
+            for t in ticks.iter() {
+                if t != price_tick {
+                    updated.push_back(t);
+                }
+            }
+            if updated.is_empty() {
+                env.storage().persistent().remove(&ticks_key);
+            } else {
+                env.storage().persistent().set(&ticks_key, &updated);
+                env.storage().persistent().extend_ttl(&ticks_key, crate::storage::PERSISTENT_TTL_THRESHOLD, crate::storage::PERSISTENT_TTL_THRESHOLD);
+            }
+        }
+    } else {
+        env.storage().persistent().set(&vol_key, &new_vol);
+        env.storage().persistent().extend_ttl(&vol_key, crate::storage::PERSISTENT_TTL_THRESHOLD, crate::storage::PERSISTENT_TTL_THRESHOLD);
+    }
+}
+
+pub fn get_liquidity_depth(env: &Env, pair: AssetPair, is_bid: bool) -> Vec<LiquidityLevel> {
+    let ticks_key = LiquidityStorageKey::ActiveTicks(pair.clone(), is_bid);
+    let ticks: Vec<i128> = env.storage().persistent().get(&ticks_key).unwrap_or_else(|| Vec::new(env));
+    let mut levels = Vec::new(env);
+    
+    let count = if ticks.len() > 20 { 20 } else { ticks.len() };
+    for i in 0..count {
+        let price_tick = ticks.get(i).unwrap();
+        let vol_key = LiquidityStorageKey::TickVolume(pair.clone(), price_tick, is_bid);
+        if let Some(volume) = env.storage().persistent().get::<_, i128>(&vol_key) {
+            levels.push_back(LiquidityLevel { price_tick, volume });
+        }
+    }
+    levels
 }
 
 #[cfg(test)]
