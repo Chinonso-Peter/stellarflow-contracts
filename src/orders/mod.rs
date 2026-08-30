@@ -1,3 +1,2 @@
 pub mod limit;
-
-pub mod cancel;
+pub mod commit_reveal;
