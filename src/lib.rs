@@ -1503,6 +1503,13 @@ impl TimeLockedUpgradeContract {
         orders::limit::fill_order(&env, filler, order_id, fill_amount)
     }
 
+    pub fn match_limit_orders(
+        env: Env, seller_order_id: u64, buyer_order_id: u64, fill_amount: i128,
+    ) -> Result<orders::limit::SettlementResult, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::match_orders(&env, seller_order_id, buyer_order_id, fill_amount)
+    }
+
     /// Cancel a still-open order and return its unfilled balance to the maker.
     pub fn cancel_limit_order(env: Env, maker: Address, order_id: u64) -> Result<i128, ContractError> {
         let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
@@ -1516,6 +1523,17 @@ impl TimeLockedUpgradeContract {
 
     pub fn get_orders_at_tick(env: Env, pair: orders::limit::AssetPair, price_tick: i128) -> Vec<u64> {
         orders::limit::get_orders_at_tick(&env, pair, price_tick)
+    }
+
+    pub fn get_order_balance(env: Env, owner: Address, asset: Address) -> i128 {
+        orders::limit::get_balance(&env, owner, asset)
+    }
+
+    pub fn withdraw_order_balance(
+        env: Env, owner: Address, asset: Address, amount: i128,
+    ) -> Result<i128, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::limit::withdraw_balance(&env, owner, asset, amount)
     }
 
     // ── Multi-hop Route Swaps ───────────────────────────────────────────────
