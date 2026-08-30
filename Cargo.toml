@@ -44,6 +44,7 @@ ledger-time-helper = { path = "contracts/ledger-time-helper" }
 
 [dev-dependencies]
 soroban-sdk = { version = "=20.0.0", default-features = false, features = ["testutils"] }
+ed25519-dalek = "2.0.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
