@@ -9,7 +9,10 @@
 
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Map, Symbol};
 
-/// Legacy staged upgrade record used by the `propose_upgrade` / `execute_upgrade` flow.
+pub(crate) const VALIDATORS_KEY: Symbol = symbol_short!("VALIDS");
+pub(crate) const VALIDATOR_SEQUENCE_KEY: Symbol = symbol_short!("VALSEQ");
+pub(crate) const BRIDGE_VALIDATORS_UPDATED_EVENT: Symbol = symbol_short!("BridgeValidatorsUpdated");
+
 #[contracttype]
 #[derive(Clone)]
 pub struct StagedUpgrade {
@@ -224,16 +227,66 @@ pub fn cancel_governance_proposal(
     Ok(())
 }
 
-/// Query the current governance proposal, if one exists.
-pub fn get_governance_proposal(
+pub fn rotate_admin_keys(
     env: &Env,
-    proposal_id: u64,
-) -> Result<GovernanceProposal, ContractError> {
-    let proposal = _load_proposal(env)?;
-    if proposal.proposal_id != proposal_id {
-        return Err(ContractError::NoActiveProposal);
+    signers: &Vec<Address>,
+    new_signers: Vec<Address>,
+    new_threshold: u32,
+) -> Result<(), ContractError> {
+    verify_upgrade_quorum(env, signers)?;
+
+    let mut signer_set: Map<Address, ()> = Map::new(env);
+    for signer in new_signers.iter() {
+        signer_set.set(signer.clone(), ());
     }
-    Ok(proposal)
+
+    if new_threshold == 0 || new_threshold > signer_set.len() {
+        return Err(ContractError::InvalidThreshold);
+    }
+
+    let mut weights: Map<Address, u32> = Map::new(env);
+    for signer in new_signers.iter() {
+        weights.set(signer.clone(), 1u32);
+    }
+
+    let mut data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
+    data.admin = new_signers
+        .get(0)
+        .ok_or(ContractError::InvalidThreshold)?
+        .clone();
+
+    env.storage().instance().set(&DATA_KEY, &data);
+    env.storage().instance().set(&SIGNERS_KEY, &signer_set);
+    env.storage().instance().set(&SIGNER_WEIGHTS_KEY, &weights);
+
+    set_governance_config(env, &GovernanceConfig {
+        quorum_threshold: new_threshold,
+    });
+    set_multisig_config(env, &MultiSigConfig {
+        required_weight: new_threshold,
+        max_signer_weight: get_multisig_config(env).max_signer_weight.max(1u32),
+    });
+
+    env.events().publish(
+        (Symbol::new(env, "AdminKeysRotated"),),
+        new_signers,
+    );
+
+    Ok(())
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct StagedUpgrade {
+    pub new_wasm_hash: BytesN<32>,
+    pub proposer: Address,
+    pub staged_at: u64,
+    /// Earliest ledger timestamp at which the replacement may execute.
+    pub execute_at: u64,
 }
 
 /// Return the number of ledger sequences remaining before a governance
@@ -274,6 +327,61 @@ pub fn is_proposal_executable(env: &Env, proposal_id: u64) -> bool {
         }
         _ => false,
     }
+    
+    Ok(collected_weight)
+}
+pub fn get_validator_set(env: &Env) -> Map<BytesN<32>, ()> {
+    env.storage()
+        .instance()
+        .get(&VALIDATORS_KEY)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+pub fn get_validator_sequence(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&VALIDATOR_SEQUENCE_KEY)
+        .unwrap_or(0u64)
+}
+
+pub fn rotate_validators(
+    env: &Env,
+    signers: &Vec<Address>,
+    new_validators: Vec<BytesN<32>>,
+) -> Result<u64, ContractError> {
+    verify_upgrade_quorum(env, signers)?;
+
+    let mut validator_set: Map<BytesN<32>, ()> = Map::new(env);
+    for validator in new_validators.iter() {
+        validator_set.set(validator.clone(), ());
+    }
+
+    let sequence = get_validator_sequence(env)
+        .checked_add(1)
+        .ok_or(ContractError::Overflow)?;
+
+    env.storage().instance().set(&VALIDATORS_KEY, &validator_set);
+    env.storage().instance().set(&VALIDATOR_SEQUENCE_KEY, &sequence);
+    env.events().publish(
+        (BRIDGE_VALIDATORS_UPDATED_EVENT, sequence),
+        new_validators,
+    );
+
+    Ok(sequence)
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct GovernanceUpgradeProposedEvent {
+    pub new_wasm_hash: BytesN<32>,
+    pub proposer: Address,
+    pub signers: Vec<Address>,
+    pub staged_at: u64,
+    pub required_weight: u32,
+    pub collected_weight: u32,
+}
+pub fn verify_staged_delay(staged_at: u64, current_time: u64, delay_seconds: u64) -> bool {
+    current_time.saturating_sub(staged_at) >= delay_seconds
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
