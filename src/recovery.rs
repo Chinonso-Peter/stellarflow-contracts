@@ -10,10 +10,10 @@ pub(crate) const LAST_ADMIN_ACTIVITY: Symbol = symbol_short!("LASTACT");
 pub const RECOVERY_INACTIVITY_THRESHOLD_SECONDS: u64 = 180 * 24 * 60 * 60;
 
 /// Event identifier published when a recovery key is configured or updated.
-pub const RECOVERY_CONFIGURED_EVENT: Symbol = symbol_short!("RECOVER_CFG");
+pub const RECOVERY_CONFIGURED_EVENT: Symbol = symbol_short!("rcv_cfg");
 
 /// Event identifier published when a recovery operation succeeds.
-pub const RECOVERY_COMPLETED_EVENT: Symbol = symbol_short!("RECOVER_DONE");
+pub const RECOVERY_COMPLETED_EVENT: Symbol = symbol_short!("rcv_done");
 
 /// Stores or updates the secondary recovery key.
 ///
@@ -177,6 +177,7 @@ mod tests {
             let data = crate::ContractData {
                 admin: admin.clone(),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&crate::DATA_KEY, &data);
 
@@ -202,6 +203,7 @@ mod tests {
             let data = crate::ContractData {
                 admin: admin.clone(),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&crate::DATA_KEY, &data);
 
@@ -253,6 +255,7 @@ mod tests {
             let data = crate::ContractData {
                 admin: Address::generate(&env),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&crate::DATA_KEY, &data);
 
@@ -268,6 +271,7 @@ mod tests {
             let data = crate::ContractData {
                 admin: Address::generate(&env),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&crate::DATA_KEY, &data);
             env.storage().instance().set(&RECOVERY_KEY, &recovery_key);
@@ -285,6 +289,7 @@ mod tests {
             let data = crate::ContractData {
                 admin: Address::generate(&env),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&crate::DATA_KEY, &data);
             env.storage().instance().set(&RECOVERY_KEY, &recovery_key);
@@ -302,6 +307,7 @@ mod tests {
             let data = crate::ContractData {
                 admin: Address::generate(&env),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&crate::DATA_KEY, &data);
             env.storage().instance().set(&RECOVERY_KEY, &recovery_key);
@@ -319,6 +325,7 @@ mod tests {
             let data = crate::ContractData {
                 admin: Address::generate(&env),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&crate::DATA_KEY, &data);
             env.storage().instance().set(&RECOVERY_KEY, &recovery_key);
@@ -346,6 +353,7 @@ mod tests {
             let data = crate::ContractData {
                 admin: Address::generate(&env),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&crate::DATA_KEY, &data);
             env.storage().instance().set(&RECOVERY_KEY, &recovery_key);
@@ -368,6 +376,7 @@ mod tests {
             let data = crate::ContractData {
                 admin: recovery_key.clone(),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&crate::DATA_KEY, &data);
             env.storage().instance().set(&RECOVERY_KEY, &recovery_key);
@@ -391,6 +400,7 @@ mod tests {
             let data = crate::ContractData {
                 admin: admin.clone(),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&crate::DATA_KEY, &data);
 
