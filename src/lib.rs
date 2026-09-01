@@ -228,6 +228,7 @@ impl ContractError {
     pub const VaultNotInitialized: Self = Self::NotInitialized;
     pub const VaultPaused: Self = Self::ContractPaused;
     pub const VaultInvalidPerformanceFee: Self = Self::InvalidVarianceConfig;
+    pub const VaultMaxDrawdownExceeded: Self = Self::ContractPaused;
     pub const OrderNotFound: Self = Self::NotRegistered;
     pub const OrderZeroAmount: Self = Self::AmountTooLow;
     pub const OrderInvalidPrice: Self = Self::NotInitialized;
@@ -1533,6 +1534,18 @@ impl TimeLockedUpgradeContract {
 
     pub fn vault_config(env: Env) -> Option<vaults::autocompound::VaultConfig> {
         vaults::autocompound::get_config(&env)
+    }
+
+    pub fn vault_peak_share_value(env: Env) -> i128 {
+        vaults::autocompound::get_peak_share_value(&env)
+    }
+
+    pub fn vault_is_circuit_breaker_triggered(env: Env) -> bool {
+        vaults::autocompound::is_circuit_breaker_triggered(&env)
+    }
+
+    pub fn vault_check_circuit_breaker(env: Env) -> Result<bool, ContractError> {
+        vaults::autocompound::check_and_trigger_circuit_breaker(&env)
     }
 
     pub fn init_yield_farming(
