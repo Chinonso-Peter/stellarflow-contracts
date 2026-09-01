@@ -104,6 +104,9 @@ pub const EV_COORD_REMOVED: Symbol = symbol_short!("coord_rem");
 /// Admin: admin ownership was transferred.
 pub const EV_ADMIN_TRANSFER: Symbol = symbol_short!("adm_xfer");
 
+/// Admin: multi-sig admin keys rotated.
+pub const EV_ADMIN_KEYS_ROTATED: Symbol = symbol_short!("rot_admin");
+
 /// Admin: emergency revocation vote was cast.
 pub const EV_REVOCATION_VOTE: Symbol = symbol_short!("revk_vote");
 
@@ -143,8 +146,14 @@ pub const EV_BALLOT_CLOSED: Symbol = symbol_short!("ball_clos");
 /// Governance: a proposal was vetoed by the Security Council.
 pub const EV_PROPOSAL_VETOED: Symbol = symbol_short!("prop_vet");
 
-/// AMM: an adaptive swap fee was scaled to a new value due to pool volatility.
-pub const EV_ADAPTIVE_FEE: Symbol = symbol_short!("afee_upd");
+/// Orders: a trader committed to a hidden trade (commit-reveal, Issue #761).
+pub const EV_COMMIT_NEW: Symbol = symbol_short!("cmt_new");
+
+/// Orders: a commitment was revealed and executed against the order book.
+pub const EV_COMMIT_REVEAL: Symbol = symbol_short!("cmt_rev");
+
+/// Orders: a commitment's bond was forfeited after its reveal deadline passed.
+pub const EV_COMMIT_FORFEIT: Symbol = symbol_short!("cmt_frf");
 
 // ---------------------------------------------------------------------------
 // Core publishing function

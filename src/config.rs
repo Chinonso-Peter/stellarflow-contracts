@@ -17,14 +17,27 @@
 //! would leave neighbouring slots in an inconsistent state across ledger
 //! registers.
 
-use soroban_sdk::{contracttype, symbol_short, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 
 use crate::{ContractData, ContractError, DATA_KEY};
+
+/// Multi-sig threshold governing admin-key rotations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminKeySet {
+    /// Current administrator addresses authorized to rotate the key set.
+    pub signers: Vec<Address>,
+    /// Number of approvals required from `signers` to rotate keys.
+    pub threshold: u32,
+}
 
 // ── Storage key ──────────────────────────────────────────────────────────────
 
 /// Ledger instance-storage key for the sealed variance configuration.
 pub(crate) const PRICE_VARIANCE_CONFIG_KEY: Symbol = symbol_short!("PVARCFG");
+
+/// Ledger instance-storage key for the multi-sig admin key set.
+pub(crate) const ADMIN_KEY_SET_KEY: Symbol = symbol_short!("ADMINKEYS");
 
 // ── Default thresholds ───────────────────────────────────────────────────────
 
@@ -105,6 +118,48 @@ impl Default for PriceVarianceConfig {
     }
 }
 
+/// Compact byte-packed representation of [`PriceVarianceConfig`] to minimize
+/// Soroban instance storage foot-print and rent costs (Issue #747).
+///
+/// Refactors 4 independent config fields (u32, u32, u32, u64 = 20 raw bytes)
+/// into a single 64-bit packed payload (8 bytes):
+/// - bits [0..16]   : max_spread_bps (u16)
+/// - bits [16..32]  : max_deviation_bps (u16)
+/// - bits [32..40]  : min_submission_count (u8)
+/// - bits [40..64]  : max_submission_age_secs (24 bits)
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedPriceVarianceConfig {
+    pub packed: u64,
+}
+
+impl PriceVarianceConfig {
+    pub fn pack(&self) -> PackedPriceVarianceConfig {
+        let spread = (self.max_spread_bps.min(0xFFFF) as u64) & 0xFFFF;
+        let dev = ((self.max_deviation_bps.min(0xFFFF) as u64) & 0xFFFF) << 16;
+        let count = ((self.min_submission_count.min(0xFF) as u64) & 0xFF) << 32;
+        let age = ((self.max_submission_age_secs.min(0xFF_FFFF) as u64) & 0xFF_FFFF) << 40;
+        PackedPriceVarianceConfig {
+            packed: spread | dev | count | age,
+        }
+    }
+}
+
+impl PackedPriceVarianceConfig {
+    pub fn unpack(&self) -> PriceVarianceConfig {
+        let max_spread_bps = (self.packed & 0xFFFF) as u32;
+        let max_deviation_bps = ((self.packed >> 16) & 0xFFFF) as u32;
+        let min_submission_count = ((self.packed >> 32) & 0xFF) as u32;
+        let max_submission_age_secs = ((self.packed >> 40) & 0xFF_FFFF) as u64;
+        PriceVarianceConfig {
+            max_spread_bps,
+            max_deviation_bps,
+            min_submission_count,
+            max_submission_age_secs,
+        }
+    }
+}
+
 // ── Validation ───────────────────────────────────────────────────────────────
 
 /// Verify that every field of `cfg` satisfies the struct invariants.
@@ -133,6 +188,70 @@ pub fn validate_price_variance_config(cfg: &PriceVarianceConfig) -> Result<(), C
 
     Ok(())
 }
+/// Verify that a proposed admin key set satisfies multi-sig sanity rules.
+pub fn validate_admin_key_set(keys: &AdminKeySet) -> Result<(), ContractError> {
+    if keys.signers.len() == 0 || keys.threshold == 0 || keys.threshold > keys.signers.len() {
+        return Err(ContractError::InvalidVarianceConfig);
+    }
+    if has_duplicate_addresses(&keys.signers) {
+        return Err(ContractError::InvalidVarianceConfig);
+    }
+    Ok(())
+}
+
+/// Read the current governing admin key set.
+pub fn get_admin_key_set(env: &Env) -> Result<AdminKeySet, ContractError> {
+    let stored: Option<AdminKeySet> = env.storage().instance().get(&ADMIN_KEY_SET_KEY);
+    if let Some(keys) = stored {
+        return Ok(keys);
+    }
+
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
+    let mut signers = Vec::new(env);
+    signers.push_back(data.admin.clone());
+    Ok(AdminKeySet { signers, threshold: 1 })
+}
+
+/// Rotate the multi-sig admin keys after receiving current-threshold approval.
+pub fn rotate_admin_keys(
+    env: &Env,
+    approving_signers: Vec<Address>,
+    new_signers: Vec<Address>,
+    new_threshold: u32,
+) -> Result<(), ContractError> {
+    let current = get_admin_key_set(env)?;
+    validate_admin_key_set(&current)?;
+    validate_admin_key_set(&AdminKeySet {
+        signers: new_signers.clone(),
+        threshold: new_threshold,
+    })?;
+
+    if has_duplicate_addresses(&approving_signers) || approving_signers.len() < current.threshold {
+        return Err(ContractError::NotAdmin);
+    }
+
+    for signer in approving_signers.iter() {
+        signer.require_auth();
+        if !current.signers.iter().any(|member| member == signer) {
+            return Err(ContractError::NotAdmin);
+        }
+    }
+
+    let new_key_set = AdminKeySet {
+        signers: new_signers.clone(),
+        threshold: new_threshold,
+    };
+    env.storage().instance().set(&ADMIN_KEY_SET_KEY, &new_key_set);
+
+    let mut data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .
 
 // ── Storage accessors ─────────────────────────────────────────────────────────
 
@@ -543,82 +662,21 @@ mod tests {
         );
     }
 
-    // ── Adaptive fee config (Issue #766) ──────────────────────────────────────
-
     #[test]
-    fn adaptive_fee_default_config_is_valid() {
-        assert!(validate_adaptive_fee_config(&AdaptiveFeeConfig::default()).is_ok());
-        let cfg = AdaptiveFeeConfig::default();
-        assert_eq!(cfg.base_fee_bps, 30);
-        assert_eq!(cfg.max_fee_bps, 150);
-        assert_eq!(cfg.low_volatility_bps, 200);
-        assert_eq!(cfg.high_volatility_bps, 500);
-    }
+    fn test_storage_allocation_minimizer_rent_reduction_assertion() {
+        let original = PriceVarianceConfig::default();
+        let packed = original.pack();
+        let unpacked = packed.unpack();
 
-    #[test]
-    fn adaptive_fee_base_above_max_is_rejected() {
-        let cfg = AdaptiveFeeConfig {
-            base_fee_bps: 200,
-            max_fee_bps: 30,
-            ..AdaptiveFeeConfig::default()
-        };
-        assert_eq!(
-            validate_adaptive_fee_config(&cfg),
-            Err(ContractError::InvalidVarianceConfig)
-        );
-    }
+        assert_eq!(unpacked, original);
 
-    #[test]
-    fn adaptive_fee_low_above_high_volatility_is_rejected() {
-        let cfg = AdaptiveFeeConfig {
-            low_volatility_bps: 900,
-            high_volatility_bps: 100,
-            ..AdaptiveFeeConfig::default()
-        };
-        assert_eq!(
-            validate_adaptive_fee_config(&cfg),
-            Err(ContractError::InvalidVarianceConfig)
-        );
-    }
+        let original_size = std::mem::size_of::<PriceVarianceConfig>();
+        let packed_size = std::mem::size_of::<PackedPriceVarianceConfig>();
 
-    #[test]
-    fn adaptive_fee_ring_buffer_below_two_is_rejected() {
-        let cfg = AdaptiveFeeConfig {
-            ring_buffer_len: 1,
-            ..AdaptiveFeeConfig::default()
-        };
-        assert_eq!(
-            validate_adaptive_fee_config(&cfg),
-            Err(ContractError::InvalidVarianceConfig)
-        );
-    }
+        assert_eq!(original_size, 20);
+        assert_eq!(packed_size, 8);
 
-    #[test]
-    fn adaptive_fee_set_and_get_round_trips_per_pool() {
-        use crate::TimeLockedUpgradeContract;
-        use soroban_sdk::testutils::Address as _;
-        use soroban_sdk::Address;
-
-        let env = soroban_sdk::Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, crate::TimeLockedUpgradeContract);
-        let client = crate::TimeLockedUpgradeContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        client.initialize(&admin, &treasury);
-
-        let pool: crate::AssetId = 3897123275;
-        let custom = AdaptiveFeeConfig {
-            base_fee_bps: 50,
-            max_fee_bps: 200,
-            ..AdaptiveFeeConfig::default()
-        };
-
-        client.set_adaptive_fee_config(&admin, &pool, &custom);
-        let retrieved = client.get_adaptive_fee_config(&pool);
-        assert_eq!(retrieved, Some(custom));
-        // An unconfigured pool returns None (falls back to legacy fee).
-        assert_eq!(client.get_adaptive_fee_config(&pool + 1), None);
+        let reduction_pct = ((original_size - packed_size) as f64 / original_size as f64) * 100.0;
+        assert!(reduction_pct >= 25.0, "Storage reduction percentage {}% is less than 25%", reduction_pct);
     }
 }
