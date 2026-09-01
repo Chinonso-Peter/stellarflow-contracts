@@ -321,12 +321,12 @@ pub struct KeyOptimizer;
 impl KeyOptimizer {
     pub fn address_to_bytes32(addr: &soroban_sdk::Address) -> soroban_sdk::BytesN<32> {
         let env = addr.env();
-        let bytes = addr.to_xdr(env);
+        let bytes = addr.clone().to_xdr(env);
         env.crypto().sha256(&bytes)
     }
 
     pub fn string_to_bytes32(env: &soroban_sdk::Env, s: &soroban_sdk::String) -> soroban_sdk::BytesN<32> {
-        let bytes = s.to_xdr(env);
+        let bytes = s.clone().to_xdr(env);
         env.crypto().sha256(&bytes)
     }
 

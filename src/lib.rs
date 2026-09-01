@@ -73,7 +73,6 @@ use crate::nonce::{consume_nonce, get_nonce};
 pub mod action_guard;
 pub mod amm;
 pub mod admin;
-pub mod amm;
 pub mod auth;
 pub mod bridge;
 pub mod escrow;
@@ -82,7 +81,6 @@ pub mod consensus;
 pub mod kernel;
 pub use kernel::instance;
 pub mod errors;
-pub mod escrow;
 pub mod events;
 pub mod fees;
 pub mod temp_governance;
@@ -98,8 +96,6 @@ pub mod settlement;
 pub mod slashing;
 pub mod staging;
 pub mod staking_tiers;
-pub mod router;
-pub mod settlement;
 pub mod state_verification;
 pub mod storage;
 pub mod temp_governance;
@@ -1669,6 +1665,79 @@ impl TimeLockedUpgradeContract {
     ) -> Result<i128, ContractError> {
         let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
         orders::limit::withdraw_balance(&env, owner, asset, amount)
+    }
+
+    // ── Anti-frontrunning Commit-Reveal Order Scheme (Issue #761) ───────────
+
+    /// Phase 1 of a commit-reveal order: lock `collateral_amount` of
+    /// `collateral_asset` behind `commitment_hash` (`sha256(secret ‖
+    /// trade_details)`) until `expiration_sequence`. Only the hash is stored,
+    /// so the trade's price/size/direction stay hidden from MEV bots until
+    /// reveal.
+    pub fn commit_order(
+        env: Env,
+        trader: Address,
+        commitment_hash: BytesN<32>,
+        collateral_asset: Address,
+        collateral_amount: i128,
+        expiration_sequence: u32,
+    ) -> Result<orders::commit_reveal::Commitment, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::commit_reveal::commit(
+            &env,
+            trader,
+            commitment_hash,
+            collateral_asset,
+            collateral_amount,
+            expiration_sequence,
+        )
+    }
+
+    /// Phase 2 of a commit-reveal order: reveal the hidden trade terms in a
+    /// ledger after the committing ledger and execute them against the order
+    /// book at the committed price. Returns the commitment bond once the
+    /// revealed terms reproduce the committed hash.
+    pub fn reveal_order(
+        env: Env,
+        commitment_id: u64,
+        trader: Address,
+        secret: Bytes,
+        pair: orders::limit::AssetPair,
+        price_tick: i128,
+        amount: i128,
+        is_buy: bool,
+    ) -> Result<orders::commit_reveal::RevealResult, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::commit_reveal::reveal(
+            &env,
+            commitment_id,
+            trader,
+            secret,
+            pair,
+            price_tick,
+            amount,
+            is_buy,
+        )
+    }
+
+    /// Forfeit a commitment's bond to the treasury once its reveal deadline
+    /// has passed without a valid reveal. Callable by anyone (keeper).
+    pub fn forfeit_order(env: Env, commitment_id: u64) -> Result<u64, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        orders::commit_reveal::forfeit(&env, commitment_id)
+    }
+
+    /// Load a stored commitment by id.
+    pub fn get_commitment(
+        env: Env,
+        commitment_id: u64,
+    ) -> Result<orders::commit_reveal::Commitment, ContractError> {
+        orders::commit_reveal::get_commitment(&env, commitment_id)
+    }
+
+    /// Number of active (unrevealed/unforfeited) commitments for a trader.
+    pub fn active_commitment_count(env: Env, trader: Address) -> u32 {
+        orders::commit_reveal::active_commitment_count(&env, &trader)
     }
 
     // ── Multi-hop Route Swaps ───────────────────────────────────────────────
