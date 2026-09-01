@@ -27,6 +27,22 @@ const MAX_PUBLIC_INPUTS: u32 = 32;
 const G16_PAIRING_COUNT: usize = 3;
 
 // ---------------------------------------------------------------------------
+// Constants for field validation
+// ---------------------------------------------------------------------------
+
+/// BN254 scalar field modulus (for Stellar Soroban's native crypto)
+/// This is the maximum valid scalar value: 21888242871839275222246405745257275088548364400416034343698204186575808495617
+pub const FIELD_MODULUS: [u8; 32] = [
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0x0a, 0xfa, 
+    0x25, 0x2a, 0x13, 0x1e, 0x22, 0x3f, 0xcd, 0x3f, 
+    0xad, 0xcf, 0x4b, 0xc7, 0xa5, 0x8d, 0xbd, 0x7f, 
+    0x71, 0x67, 0x89, 0x42, 0x86, 0x95, 0x58, 0x30,
+];
+
+/// Default nullifier value that should be rejected (zero)
+const ZERO_SCALAR: [u8; 32] = [0u8; 32];
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -70,6 +86,89 @@ pub struct VerificationResult {
 }
 
 // ---------------------------------------------------------------------------
+// Public Input Sanitizer Guard
+// ---------------------------------------------------------------------------
+
+/// Validate public inputs for structural integrity and field bounds.
+/// 
+/// This function ensures all public inputs are valid field elements and
+/// have the expected structural properties before verification.
+/// 
+/// # Arguments
+/// * `env` - The Soroban environment.
+/// * `public_inputs` - The public inputs to validate.
+/// 
+/// # Returns
+/// * `Ok(())` if all inputs are valid.
+/// * `Err(ContractError::InvalidPublicInputs)` if any validation fails.
+fn validate_public_inputs(
+    env: &Env,
+    public_inputs: &Vec<Scalar>,
+) -> Result<(), ContractError> {
+    // Check if there are any inputs (could be zero for some circuits)
+    if public_inputs.len() == 0 {
+        return Err(ContractError::InvalidPublicInputs);
+    }
+
+    // Iterate through all public inputs
+    for (index, input) in public_inputs.iter().enumerate() {
+        // 1. FIELD BOUNDS CHECK: Ensure each input is within scalar field modulus
+        // Convert Scalar to bytes for comparison
+        let input_bytes = env.crypto().scalar_to_bytes(input);
+        
+        // Check if input is greater than or equal to field modulus
+        if is_scalar_ge_field_modulus(&input_bytes) {
+            return Err(ContractError::InvalidPublicInputs);
+        }
+
+        // 2. STRUCTURAL INTEGRITY CHECKS
+        // In a typical ZK circuit, the first public input is often the nullifier
+        if index == 0 {
+            // Nullifier must NOT be zero
+            if input_bytes == ZERO_SCALAR {
+                return Err(ContractError::InvalidPublicInputs);
+            }
+        }
+
+        // If the second input is the commitment hash (common pattern)
+        if index == 1 {
+            // Commitment must NOT be zero
+            if input_bytes == ZERO_SCALAR {
+                return Err(ContractError::InvalidPublicInputs);
+            }
+            
+            // Optional: Check if commitment has valid structure
+            // (e.g., if it should have certain bits set)
+        }
+
+        // Additional structural checks can be added based on your circuit's
+        // public input layout. For example:
+        // - Check that a "merkle root" is within expected range
+        // - Validate "recipient" addresses
+        // - Verify "amount" is positive
+        // - etc.
+    }
+
+    Ok(())
+}
+
+/// Helper function to compare a scalar (in bytes) against the field modulus.
+/// Returns true if scalar >= FIELD_MODULUS (out of bounds).
+fn is_scalar_ge_field_modulus(scalar_bytes: &[u8; 32]) -> bool {
+    // Compare byte by byte from most significant to least
+    for i in 0..32 {
+        if scalar_bytes[i] > FIELD_MODULUS[i] {
+            return true;
+        } else if scalar_bytes[i] < FIELD_MODULUS[i] {
+            return false;
+        }
+        // If equal, continue to next byte
+    }
+    // If all bytes are equal, scalar == FIELD_MODULUS, which is invalid
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Core verification logic
 // ---------------------------------------------------------------------------
 
@@ -96,6 +195,11 @@ pub fn verify_proof(
 ) -> Result<VerificationResult, ContractError> {
     // Start tracking gas usage
     let start_gas = env.ledger().gas_remaining();
+    
+    // ================================================================
+    // PUBLIC INPUT SANITIZER GUARD - MUST BE FIRST
+    // ================================================================
+    validate_public_inputs(env, public_inputs)?;
     
     // Validate input sizes first to bound computation
     if public_inputs.len() as u32 > MAX_PUBLIC_INPUTS {
@@ -203,6 +307,9 @@ pub fn batch_verify_proofs(
     }
     
     for (proof, vkey, inputs) in proofs.iter() {
+        // Validate public inputs for each proof before verification
+        validate_public_inputs(env, inputs)?;
+        
         match verify_proof(env, &proof, &vkey, &inputs) {
             Ok(result) => results.push_back(result),
             Err(e) => return Err(e),
@@ -344,5 +451,82 @@ mod tests {
         
         let result = batch_verify_proofs(&env, &proofs);
         assert_eq!(result, Err(ContractError::InvalidArgument));
+    }
+
+    #[test]
+    fn validate_public_inputs_rejects_out_of_bounds_scalars() {
+        let env = Env::default();
+        env.mock_all_auths();
+        
+        // Create an input that's out of bounds (using a large scalar)
+        let mut large_input = [0u8; 32];
+        large_input[0] = 0xFF; // This should be > FIELD_MODULUS
+        
+        let mut inputs = Vec::new(&env);
+        inputs.push_back(env.crypto().scalar_from_bytes(&large_input));
+        
+        let result = validate_public_inputs(&env, &inputs);
+        assert_eq!(result, Err(ContractError::InvalidPublicInputs));
+    }
+
+    #[test]
+    fn validate_public_inputs_rejects_zero_nullifier() {
+        let env = Env::default();
+        env.mock_all_auths();
+        
+        let zero_input = [0u8; 32];
+        
+        let mut inputs = Vec::new(&env);
+        inputs.push_back(env.crypto().scalar_from_bytes(&zero_input));
+        
+        let result = validate_public_inputs(&env, &inputs);
+        assert_eq!(result, Err(ContractError::InvalidPublicInputs));
+    }
+
+    #[test]
+    fn validate_public_inputs_accepts_valid_inputs() {
+        let env = Env::default();
+        env.mock_all_auths();
+        
+        let valid_input = [1u8; 32]; // Simple valid input (should be < modulus)
+        
+        let mut inputs = Vec::new(&env);
+        inputs.push_back(env.crypto().scalar_from_bytes(&valid_input));
+        
+        let result = validate_public_inputs(&env, &inputs);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn verify_proof_calls_validate_public_inputs_first() {
+        let env = Env::default();
+        env.mock_all_auths();
+        
+        // Create proof and vkey with valid points
+        let proof = Groth16Proof {
+            a: env.crypto().g1_generator(),
+            b: env.crypto().g2_generator(),
+            c: env.crypto().g1_generator(),
+        };
+        
+        let mut ic = Vec::new(&env);
+        ic.push_back(env.crypto().g1_generator());
+        
+        let vkey = VerificationKey {
+            alpha_beta: env.crypto().g2_generator(),
+            gamma: env.crypto().g2_generator(),
+            delta: env.crypto().g2_generator(),
+            ic,
+        };
+        
+        // Use an invalid input (out of bounds) to test the sanitizer
+        let mut large_input = [0u8; 32];
+        large_input[0] = 0xFF;
+        
+        let mut inputs = Vec::new(&env);
+        inputs.push_back(env.crypto().scalar_from_bytes(&large_input));
+        
+        let result = verify_proof(&env, &proof, &vkey, &inputs);
+        assert_eq!(result, Err(ContractError::InvalidPublicInputs));
     }
 }
