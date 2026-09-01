@@ -7,19 +7,11 @@
 use crate::NodeProfile;
 use soroban_sdk::{contracttype, Address, Env, Map, Symbol};
 
-/// Helpers and keys for short-lived calculation state.
-#[path = "storage/ephemeral.rs"]
-pub(crate) mod ephemeral;
-
-/// Fixed-size tuple-based storage keys for gas-optimized lookups.
-/// Replaces dynamic Map structures with direct tuple keys.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     /// Subscription record keyed by consumer [@address].
     Subscription(Address),
-    /// Asset price entry keyed by a [`Symbol`].
-    AssetPrice(Symbol),
 }
 
 /// NOTE: These are single-variant enums, not bare tuple structs. A single-field
@@ -152,7 +144,7 @@ pub fn get_node_profiles(env: &Env) -> Map<Address, NodeProfile> {
 
 pub fn extend_subscription_rent(env: &Env, consumer_id: Address) {
     let key = DataKey::Subscription(consumer_id);
-    extend_persistent_ttl(env, &key);
+    env.storage().persistent().extend_ttl(&key, RENT_THRESHOLD, RENT_EXTEND_TO);
 }
 
 pub fn check_subscription(env: &Env, consumer_id: Address) -> bool {
