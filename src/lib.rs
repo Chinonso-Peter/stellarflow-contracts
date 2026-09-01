@@ -195,6 +195,29 @@ pub enum ContractError {
     ProposalNotFound = 61,
     ProposalNotVetoable = 62,
     ProposalAlreadyVetoed = 63,
+    /// Spot price executed by an AMM swap deviates from the TWAP oracle value
+    /// by more than the governance-configured safety threshold (Issue #743).
+    OracleDeviationTooHigh = 64,
+    /// An oracle deviation guard configuration violates its structural bounds.
+    InvalidOracleDeviationConfig = 65,
+    /// AMM math was called with a structurally invalid input.
+    InvalidInput = 66,
+    /// Circuit breaker configuration violates its structural invariants.
+    InvalidCircuitBreakerConfig = 67,
+    /// Pool trading is currently frozen by the spot-price circuit breaker.
+    CircuitBreakerTripped = 68,
+    /// Tick spacing must be a strictly positive integer.
+    InvalidTickSpacing = 69,
+    /// The tick index for this pool already exists.
+    TickIndexAlreadyExists = 70,
+    /// No tick index exists for this pool.
+    TickIndexNotFound = 71,
+    /// Tick must be aligned to the pool's configured tick spacing.
+    TickNotAligned = 72,
+    /// Tick index is outside the allowed price range bounds.
+    TickOutOfBounds = 73,
+    /// Too many initialized ticks for a single pool.
+    TooManyTicks = 74,
 }
 
 impl ContractError {

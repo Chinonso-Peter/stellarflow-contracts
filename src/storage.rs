@@ -21,7 +21,7 @@ pub enum DataKey {
 // collide on the exact same storage slot.
 //
 // Wrapping each in an enum adds a discriminant to the serialized value — but
-// Soroban's `#contracttype]` enum encoding namespaces only by the *variant
+// Soroban's `#[contracttype]` enum encoding namespaces only by the *variant
 // name* (as a Symbol), not by the Rust type name. Two different enums that
 // happen to share a variant name with the same field shape (e.g. two enums
 // both using a variant called `Asset(Symbol)`) still collide. Every variant
@@ -171,7 +171,7 @@ pub fn extend_asset_rent(env: &Env, asset: Symbol) -> bool {
 /// instance-storage TTL so gating logic that depends on instance data never
 /// trips over an expired instance entry.
 pub fn preflight_rent_check(env: &Env) {
-    env.storage().instance().extend_ttl(0, ASSET_TTL_THRESHOLD);
+    env.storage().instance().extend_ttl(0, ASET_TTL_THRESHOLD);
 }
 
 /// Prune a feed stake entry that has gone stale (issue #522: storage-rent
